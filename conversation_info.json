@@ -1,0 +1,16 @@
+{
+  "chat_info": {
+    "chat_id": "+27745545050",
+    "message_id": "ACDC9767066EFCB016C012AB23081E3F",
+    "sender_id": "+27745545050",
+    "sender": "Z",
+    "timestamp": "Thu 2026-05-14 11:42 UTC",
+    "group_members": "+27745545050"
+  },
+  "sender_info": {
+    "label": "Z (+27745545050)",
+    "id": "+27745545050",
+    "name": "Z",
+    "e164": "+27745545050"
+  }
+}

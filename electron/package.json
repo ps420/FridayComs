@@ -1,0 +1,22 @@
+{
+  "name": "fridaycoms-electron",
+  "version": "1.0.0",
+  "description": "FridayComs Desktop App",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "NODE_ENV=development electron . --no-sandbox",
+    "build": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^29.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "build": {
+    "appId": "com.fridaycoms.app",
+    "productName": "FridayComs",
+    "directories": {
+      "output": "dist"
+    }
+  }
+}
