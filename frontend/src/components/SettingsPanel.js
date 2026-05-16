@@ -7,12 +7,19 @@ function SettingsPanel() {
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [autoPlay, setAutoPlay] = useState(false);
   const [stats, setStats] = useState({ messages: 0, uptime: '0s' });
+  const [features, setFeatures] = useState({});
 
   useEffect(() => {
     fetch('/api/health')
       .then(res => res.json())
-      .then(data => setStats({ messages: data.messages || 0, uptime: 'Active' }))
-      .catch(() => setStats({ messages: 0, uptime: 'Offline' }));
+      .then(data => {
+        setStats({ messages: data.messages || 0, uptime: 'Active' });
+        setFeatures(data.features || {});
+      })
+      .catch(() => {
+        setStats({ messages: 0, uptime: 'Offline' });
+        setFeatures({});
+      });
   }, []);
 
   return (
@@ -110,6 +117,26 @@ function SettingsPanel() {
         </div>
       </div>
       
+      <div className="settings-section">
+        <h3>System Status</h3>
+        <div className="feature-status-list">
+          {Object.entries(features).map(([key, feature]) => (
+            <div key={key} className={`feature-status ${feature.status}`}>
+              <div className="feature-header">
+                <span className="feature-name">{feature.label}</span>
+                <span className={`feature-badge ${feature.status}`}>
+                  {feature.status === 'connected' && '✓'}
+                  {feature.status === 'mock' && 'MOCK'}
+                  {feature.status === 'placeholder' && 'PLACEHOLDER'}
+                  {feature.status === 'disconnected' && 'OFF'}
+                </span>
+              </div>
+              <span className="feature-note">{feature.note}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
       <div className="settings-section stats-section">
         <h3>Statistics</h3>
         <div className="stats-grid">

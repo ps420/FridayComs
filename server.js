@@ -2,8 +2,7 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
-const fs = require('fs');
-const { exec } = require('child_process');
+const { spawn } = require('child_process');
 
 const app = express();
 const server = http.createServer(app);
@@ -12,7 +11,15 @@ const wss = new WebSocket.Server({ server });
 const AUTH_PASSWORD = process.env.PASSWORD || 'Friday123';
 const PORT = process.env.PORT || 3456;
 
-// Store chat history
+// Service status tracking
+const serviceStatus = {
+  backend: 'connected',
+  websocket: 'connected',
+  ai: 'mock',
+  voice: 'placeholder',
+  openclaw: 'disconnected'
+};
+
 let chatHistory = [];
 let activeConnections = new Set();
 
@@ -41,13 +48,42 @@ const checkAuth = (req, res, next) => {
 
 app.use(checkAuth);
 
-// Health check
+// Health check - shows real vs mock status
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     timestamp: new Date().toISOString(),
+    service: 'fridaycoms',
+    version: '1.0.0',
     connections: activeConnections.size,
-    messages: chatHistory.length
+    messages: chatHistory.length,
+    features: {
+      backend: {
+        status: serviceStatus.backend,
+        label: 'Backend API',
+        note: '✓ Real - Express server running'
+      },
+      websocket: {
+        status: serviceStatus.websocket,
+        label: 'Real-time Chat',
+        note: '✓ Real - WebSocket connected'
+      },
+      ai: {
+        status: serviceStatus.ai,
+        label: 'Friday AI',
+        note: '⚠ MOCK - Simulated responses only'
+      },
+      voice: {
+        status: serviceStatus.voice,
+        label: 'Voice Input',
+        note: '📦 PLACEHOLDER - UI only, no recording'
+      },
+      openclaw: {
+        status: serviceStatus.openclaw,
+        label: 'OpenClaw Integration',
+        note: '❌ NOT CONNECTED - Next implementation'
+      }
+    }
   });
 });
 
@@ -63,20 +99,17 @@ app.post('/api/chat/clear', (req, res) => {
   res.json({ success: true });
 });
 
-// File upload endpoint
-app.post('/api/upload', (req, res) => {
-  res.json({ success: true, message: 'File upload ready' });
-});
-
 // WebSocket handling
 wss.on('connection', (ws) => {
-  console.log('New WebSocket connection');
+  console.log('WebSocket connected - Real-time chat active');
   activeConnections.add(ws);
+  serviceStatus.websocket = 'connected';
   
-  // Send welcome message
+  // Send welcome with clear mock disclaimer
   ws.send(JSON.stringify({
     type: 'system',
     content: 'Connected to FridayComs',
+    mockWarning: '⚠️ AI responses are MOCK/SIMULATED for UI testing only.',
     timestamp: Date.now()
   }));
   
@@ -93,55 +126,45 @@ wss.on('connection', (ws) => {
           timestamp: Date.now()
         };
         chatHistory.push(userMsg);
-        
-        // Broadcast to all connections
         broadcast({ type: 'message', data: userMsg });
         
-        // Get AI response
-        try {
-          const aiResponse = await getAIResponse(data.content);
-          const aiMsg = {
+        // MOCK AI response - clearly labeled
+        setTimeout(() => {
+          const mockMsg = {
             id: Date.now() + 1,
             type: 'ai',
-            content: aiResponse,
+            isMock: true,
+            content: `[🤖 MOCK AI] ${getMockResponse(data.content)}`,
+            note: 'This is a simulated response for UI testing. Real Friday AI not connected yet.',
             timestamp: Date.now()
           };
-          chatHistory.push(aiMsg);
-          broadcast({ type: 'message', data: aiMsg });
-        } catch (err) {
-          console.error('AI Error:', err);
-          const errorMsg = {
-            id: Date.now() + 1,
-            type: 'error',
-            content: 'Friday is thinking... try again in a moment.',
-            timestamp: Date.now()
-          };
-          broadcast({ type: 'message', data: errorMsg });
-        }
+          chatHistory.push(mockMsg);
+          broadcast({ type: 'message', data: mockMsg });
+        }, 500 + Math.random() * 1000);
       }
       
       if (data.type === 'voice') {
-        // Handle voice message
         const voiceMsg = {
           id: Date.now(),
           type: 'user',
-          content: '🎤 Voice message',
+          content: '🎤 Voice message sent',
           isVoice: true,
+          note: 'Voice recording is PLACEHOLDER - no audio captured',
           timestamp: Date.now()
         };
         chatHistory.push(voiceMsg);
         broadcast({ type: 'message', data: voiceMsg });
         
-        // AI response to voice
         setTimeout(() => {
-          const aiMsg = {
+          const mockMsg = {
             id: Date.now() + 1,
             type: 'ai',
-            content: "I heard you! (Voice processing coming soon 🎙️)",
+            isMock: true,
+            content: '[🤖 MOCK AI] Voice placeholder acknowledged. Real voice processing not connected.',
             timestamp: Date.now()
           };
-          chatHistory.push(aiMsg);
-          broadcast({ type: 'message', data: aiMsg });
+          chatHistory.push(mockMsg);
+          broadcast({ type: 'message', data: mockMsg });
         }, 1000);
       }
       
@@ -152,6 +175,9 @@ wss.on('connection', (ws) => {
   
   ws.on('close', () => {
     activeConnections.delete(ws);
+    if (activeConnections.size === 0) {
+      serviceStatus.websocket = 'waiting';
+    }
     console.log('WebSocket disconnected');
   });
 });
@@ -166,40 +192,34 @@ function broadcast(data) {
   });
 }
 
-// AI response function
-async function getAIResponse(message) {
-  // Simple responses for now - can integrate with OpenClaw later
-  const responses = [
-    "I hear you loud and clear! 🎯",
-    "That's interesting... tell me more! 💭",
-    "I'm processing that... 🤖",
-    "Got it! Working on it... ⚡",
-    "Friday at your service! How can I help? 🚀",
-    "Hmm, let me think about that... 🧠",
-    "Absolutely! I'm on it. 💪",
-    "Fascinating input! Keep it coming! 🎉"
-  ];
-  
-  // Simulate thinking time
-  await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
-  
-  // Determine response based on message content
+// MOCK responses - clearly for UI testing only
+function getMockResponse(message) {
   const lowerMsg = message.toLowerCase();
   
   if (lowerMsg.includes('hello') || lowerMsg.includes('hi')) {
-    return "Hey there! 👋 Friday is online and ready to roll!";
+    return "[MOCK] Hey! This is a simulated greeting. Real Friday AI coming soon.";
   }
   if (lowerMsg.includes('help')) {
-    return "I can chat with you, process voice messages, and soon I'll be fully connected to all your systems! What do you need? 🔧";
+    return "[MOCK] Help command simulated. Features: Backend ✓ | WebSocket ✓ | AI (this is mock) | Voice (placeholder) | OpenClaw ❌";
+  }
+  if (lowerMsg.includes('status')) {
+    return "[MOCK] System status - Backend: connected | AI: MOCK MODE | OpenClaw: not connected";
   }
   if (lowerMsg.includes('friday')) {
-    return "That's me! Your AI operator, at your service! 🤖✨";
+    return "[MOCK] You called? I'm Friday in placeholder mode. Real intelligence via OpenClaw coming next.";
   }
-  if (lowerMsg.includes('zayan') || lowerMsg.includes('zay')) {
-    return "Zayan! The boss himself! What's the mission today? 🎯";
+  if (lowerMsg.includes('mock') || lowerMsg.includes('fake')) {
+    return "[MOCK] Yes, I'm currently a mock! Backend and WebSocket are real. AI is simulated for UI testing.";
   }
   
-  // Random response
+  const responses = [
+    "[MOCK] This is a simulated response for UI testing.",
+    "[MOCK] Real Friday AI not connected yet - backend is live though!",
+    "[MOCK] UI test message - OpenClaw integration coming next.",
+    "[MOCK] Chat system working! Ready for real AI connection.",
+    "[MOCK] FridayComs backend ✓ | WebSocket ✓ | AI (mock only)"
+  ];
+  
   return responses[Math.floor(Math.random() * responses.length)];
 }
 
@@ -209,7 +229,13 @@ app.get('*', (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`🚀 FridayComs server running on port ${PORT}`);
-  console.log(`🔒 Password protected`);
-  console.log(`💬 WebSocket ready`);
+  console.log('🚀 FridayComs Enhanced');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('✓ Backend: Real (Express)');
+  console.log('✓ WebSocket: Real (ws)');
+  console.log('⚠ AI: MOCK/Simulated (UI testing)');
+  console.log('📦 Voice: Placeholder (UI only)');
+  console.log('❌ OpenClaw: Not connected (next step)');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log(`Port: ${PORT}`);
 });
