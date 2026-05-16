@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: fridaycoms
+    runtime: node
+    buildCommand: "npm install && cd frontend && npm install && npm run build"
+    startCommand: "node server.js"
+    envVars:
+      - key: PASSWORD
+        value: Friday123
+      - key: NODE_ENV
+        value: production
