@@ -283,10 +283,28 @@ app.post('/api/calls/:id/process', async (req, res) => {
     });
     
   } catch (err) {
-    console.error('[Voice] Processing error:', err);
+    console.error('[Turn] ========== PROCESSING FAILED ==========');
+    console.error(`[Turn] Error: ${err.message}`);
+    console.error(`[Turn] Stack:`, err.stack);
+    console.error('[Turn] =======================================');
+    
+    // Determine which step failed based on error message
+    let failedStep = 'unknown';
+    if (err.message.includes('STT') || err.message.includes('Speech') || err.message.includes('recognition')) {
+      failedStep = 'stt';
+    } else if (err.message.includes('AI') || err.message.includes('OpenAI')) {
+      failedStep = 'ai';
+    } else if (err.message.includes('TTS') || err.message.includes('Synthesis')) {
+      failedStep = 'tts';
+    } else if (err.message.includes('conversion') || err.message.includes('ffmpeg')) {
+      failedStep = 'conversion';
+    }
+    
     res.status(500).json({ 
       error: 'Voice processing failed',
-      message: err.message 
+      step: failedStep,
+      message: err.message,
+      details: err.stack?.split('\n')[0]
     });
   }
 });

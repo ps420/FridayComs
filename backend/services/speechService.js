@@ -11,13 +11,23 @@ class SpeechService {
     this.speechKey = process.env.AZURE_SPEECH_KEY;
     this.speechRegion = process.env.AZURE_SPEECH_REGION;
     this.voiceName = process.env.AZURE_SPEECH_VOICE_NAME || 'en-US-JennyNeural';
+    this.ffmpegAvailable = false;
     
     this.enabled = !!(this.speechKey && this.speechRegion);
+    
+    // Check ffmpeg availability
+    try {
+      require('child_process').execSync('which ffmpeg', { stdio: 'ignore' });
+      this.ffmpegAvailable = true;
+    } catch (e) {
+      this.ffmpegAvailable = false;
+    }
     
     if (this.enabled) {
       console.log(`[SpeechService] Initialized`);
       console.log(`  - Region: ${this.speechRegion}`);
       console.log(`  - Voice: ${this.voiceName}`);
+      console.log(`  - ffmpeg: ${this.ffmpegAvailable ? 'available' : 'NOT available'}`);
     } else {
       console.log('[SpeechService] Disabled - missing AZURE_SPEECH_KEY or AZURE_SPEECH_REGION');
     }
@@ -153,27 +163,46 @@ class SpeechService {
     console.log(`[Speech RecognizeOnce] Starting...`);
     console.log(`  - Input: ${audioBuffer.length} bytes`);
     console.log(`  - MIME type: ${mimeType}`);
+    console.log(`  - ffmpeg installed: ${this.ffmpegAvailable}`);
 
     // Convert to WAV
     let wavBuffer;
+    let conversionMethod = 'none';
+    
     if (mimeType.includes('webm')) {
-      wavBuffer = await this.convertWebmToWav(audioBuffer);
+      try {
+        wavBuffer = await this.convertWebmToWav(audioBuffer);
+        conversionMethod = this.ffmpegAvailable ? 'ffmpeg' : 'header-only';
+      } catch (convErr) {
+        console.error(`[Speech] Conversion failed: ${convErr.message}`);
+        throw new Error(`Audio conversion failed: ${convErr.message}`);
+      }
     } else {
       wavBuffer = audioBuffer;
     }
 
-    console.log(`[Speech] Converted to WAV: ${wavBuffer.length} bytes`);
+    console.log(`[Speech] Converted to WAV: ${wavBuffer.length} bytes (method: ${conversionMethod})`);
+
+    // Validate WAV header
+    const isValidWav = wavBuffer.length > 44 && 
+                       wavBuffer.toString('ascii', 0, 4) === 'RIFF' &&
+                       wavBuffer.toString('ascii', 8, 12) === 'WAVE';
+    console.log(`[Speech] WAV validation: ${isValidWav ? 'VALID' : 'INVALID'}`);
 
     return new Promise((resolve, reject) => {
       try {
         const speechConfig = sdk.SpeechConfig.fromSubscription(this.speechKey, this.speechRegion);
         speechConfig.speechRecognitionLanguage = 'en-US';
 
-        // Create format
+        // Create format - 16kHz, 16-bit, mono
         const format = sdk.AudioStreamFormat.getWaveFormatPCM(16000, 16, 1);
         const pushStream = sdk.AudioInputStream.createPushStream(format);
         
-        pushStream.write(wavBuffer);
+        // Write in chunks
+        const chunkSize = 4096;
+        for (let i = 0; i < wavBuffer.length; i += chunkSize) {
+          pushStream.write(wavBuffer.slice(i, i + chunkSize));
+        }
         pushStream.close();
 
         const audioConfig = sdk.AudioConfig.fromStreamInput(pushStream);
@@ -184,30 +213,48 @@ class SpeechService {
         recognizer.recognizeOnceAsync(
           (result) => {
             recognizer.close();
-            console.log(`[Speech] Result: reason=${result.reason}, text="${result.text}"`);
+            
+            const reasonNames = {
+              0: 'NoMatch',
+              1: 'Canceled', 
+              2: 'RecognizingSpeech',
+              3: 'RecognizedSpeech',
+              4: 'SpeechStartDetected',
+              5: 'SpeechEndDetected'
+            };
+            const reasonName = reasonNames[result.reason] || `Unknown(${result.reason})`;
+            
+            console.log(`[Speech] Result: reason=${result.reason} (${reasonName}), text="${result.text || '(empty)'}"`);
             
             if (result.reason === sdk.ResultReason.RecognizedSpeech) {
+              console.log(`[Speech] SUCCESS: "${result.text}"`);
               resolve({
                 text: result.text,
                 duration: result.duration,
                 confidence: result.properties?.getProperty(sdk.PropertyId.SpeechServiceResponse_JsonResult)
               });
             } else if (result.reason === sdk.ResultReason.NoMatch) {
+              console.log('[Speech] NoMatch: No speech detected in audio');
               resolve({ text: '', duration: 0, confidence: 0 });
+            } else if (result.reason === sdk.ResultReason.Canceled) {
+              const details = result.errorDetails || 'Unknown cancellation';
+              console.error(`[Speech] CANCELED: ${details}`);
+              reject(new Error(`Speech recognition canceled: ${details}`));
             } else {
-              reject(new Error(`Recognition failed: ${result.reason}`));
+              console.error(`[Speech] FAILED: reason=${result.reason} (${reasonName})`);
+              reject(new Error(`Recognition failed: ${reasonName}`));
             }
           },
           (err) => {
             recognizer.close();
             console.error('[Speech] RecognizeOnce error:', err);
-            reject(err);
+            reject(new Error(`STT error: ${err.message || err}`));
           }
         );
         
       } catch (err) {
         console.error('[Speech] Exception:', err.message);
-        reject(err);
+        reject(new Error(`STT setup error: ${err.message}`));
       }
     });
   }

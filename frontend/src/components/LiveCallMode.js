@@ -340,7 +340,10 @@ function LiveCallMode({ sessionId }) {
       const result = await response.json();
       
       if (!response.ok || result.error) {
-        throw new Error(result.error || result.message || 'Backend error');
+        // Build detailed error message from backend response
+        const errorDetail = result.step ? `[${result.step.toUpperCase()} failed] ` : '';
+        const errorMessage = result.message || result.error || 'Backend error';
+        throw new Error(`${errorDetail}${errorMessage}${result.details ? ': ' + result.details : ''}`);
       }
       
       // 5. UPDATE STATE WITH RESULTS
