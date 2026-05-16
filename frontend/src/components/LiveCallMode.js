@@ -350,6 +350,11 @@ function LiveCallMode({ sessionId }) {
       lastTranscriptRef.current = result.transcript || '';
       lastAiReplyRef.current = result.aiResponse || '';
       
+      // Update session ID if backend returned one (for auto-created sessions)
+      if (result.sessionId && result.sessionId !== sessionId) {
+        log('Session updated', { old: sessionId, new: result.sessionId });
+      }
+      
       updateDebug({
         lastTranscript: result.transcript?.slice(0, 100) || '',
         lastAiReply: result.aiResponse?.slice(0, 100) || '',
@@ -358,7 +363,8 @@ function LiveCallMode({ sessionId }) {
       
       log('Got response', { 
         transcript: result.transcript,
-        aiReplyLength: result.aiResponse?.length 
+        aiReplyLength: result.aiResponse?.length,
+        sessionId: result.sessionId 
       });
       
       // 6. PLAY TTS RESPONSE

@@ -325,24 +325,47 @@ app.post('/api/calls/:id/process', async (req, res) => {
       });
     }
     
-    // Save user message to session if provided
-    if (sessionId) {
-      messageService.addMessage(sessionId, 'user', userTranscript);
+    // Step 2: Ensure session exists and save user message
+    let effectiveSessionId = sessionId;
+    
+    if (!effectiveSessionId) {
+      // Auto-create session for voice calls without existing session
+      console.log('[Turn] No session provided, creating new session...');
+      const newSession = sessionService.createSession(req.userId, 'Voice Call');
+      effectiveSessionId = newSession.id;
+      console.log(`[Turn] Created session: ${effectiveSessionId}`);
     }
     
-    // Step 2: Get conversation context
+    // Save user message
+    messageService.addMessage(effectiveSessionId, 'user', userTranscript);
+    
+    // Step 3: Get conversation context
     let context = [];
-    if (sessionId) {
-      context = await memory.buildContext(sessionId);
+    try {
+      context = await memory.buildContext(effectiveSessionId);
+    } catch (ctxErr) {
+      console.log(`[Turn] Warning: Could not build context: ${ctxErr.message}`);
+      context = [];
     }
     
-    // Step 3: Send to AI provider
-    console.log('[Turn] Step 2: Sending to Azure OpenAI...');
+    // Ensure context is always an array
+    const safeHistory = Array.isArray(context) ? context : [];
+    
+    console.log(`[Turn] Step 2: Sending to AI...`);
+    console.log(`  - SessionId: ${effectiveSessionId}`);
+    console.log(`  - History type: ${typeof safeHistory}, length: ${safeHistory.length}`);
+    console.log(`  - Transcript: "${userTranscript}"`);
+    
     const aiStart = Date.now();
-    const aiResult = await aiProvider.sendMessage(userTranscript, { 
-      context,
-      streaming: false 
-    });
+    let aiResult;
+    
+    try {
+      aiResult = await aiProvider.sendMessage(userTranscript, safeHistory);
+    } catch (aiErr) {
+      console.error(`[Turn] AI call failed: ${aiErr.message}`);
+      throw new Error(`AI error: ${aiErr.message}`);
+    }
+    
     const aiLatency = Date.now() - aiStart;
     
     const aiResponse = aiResult.content;
@@ -350,13 +373,11 @@ app.post('/api/calls/:id/process', async (req, res) => {
     
     // Save AI message to session
     let aiMessage = null;
-    if (sessionId) {
-      aiMessage = messageService.addMessage(sessionId, 'assistant', aiResponse, {
-        provider: aiResult.provider,
-        latency: aiLatency,
-        usage: aiResult.usage
-      });
-    }
+    aiMessage = messageService.addMessage(effectiveSessionId, 'assistant', aiResponse, {
+      provider: aiResult.provider,
+      latency: aiLatency,
+      usage: aiResult.usage
+    });
     
     // Step 4: Text-to-Speech
     console.log('[Turn] Step 3: Text-to-Speech...');
@@ -383,6 +404,7 @@ app.post('/api/calls/:id/process', async (req, res) => {
     
     // Return results
     res.json({
+      sessionId: effectiveSessionId,
       transcript: userTranscript,
       aiResponse,
       audioBase64: ttsResult.audioBase64,
@@ -399,13 +421,15 @@ app.post('/api/calls/:id/process', async (req, res) => {
     
     // Determine which step failed based on error message
     let failedStep = 'unknown';
-    if (err.message.includes('STT') || err.message.includes('Speech') || err.message.includes('recognition')) {
+    const errMsg = err.message.toLowerCase();
+    
+    if (errMsg.includes('stt') || errMsg.includes('speech') || errMsg.includes('recognition') || errMsg.includes('canceled')) {
       failedStep = 'stt';
-    } else if (err.message.includes('AI') || err.message.includes('OpenAI')) {
+    } else if (errMsg.includes('ai error') || errMsg.includes('openai') || errMsg.includes('history') || errMsg.includes('iterable')) {
       failedStep = 'ai';
-    } else if (err.message.includes('TTS') || err.message.includes('Synthesis')) {
+    } else if (errMsg.includes('tts') || errMsg.includes('synthesis') || errMsg.includes('speechsynthesizer')) {
       failedStep = 'tts';
-    } else if (err.message.includes('conversion') || err.message.includes('ffmpeg')) {
+    } else if (errMsg.includes('conversion') || errMsg.includes('ffmpeg') || errMsg.includes('wav')) {
       failedStep = 'conversion';
     }
     
