@@ -26,7 +26,7 @@ const AUTH_PASSWORD = process.env.PASSWORD || 'Friday123';
 const PORT = process.env.PORT || 3456;
 
 // Middleware
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'frontend/build')));
 
 // Auth middleware
@@ -57,11 +57,15 @@ app.get('/api/health', (req, res) => {
   const db = getDatabase();
   const isAzure = streamingService.azureProvider.isConfigured();
   
+  const { getSpeechService } = require('./backend/services/speechService');
+  const speechService = getSpeechService();
+  const isSpeechEnabled = speechService.isEnabled();
+  
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     service: 'fridaycoms',
-    version: '1.1.0',
+    version: '1.2.0',
     database: db ? 'connected' : 'error',
     streaming: 'enabled',
     features: {
@@ -74,7 +78,10 @@ app.get('/api/health', (req, res) => {
       },
       sessions: { status: 'enabled', note: 'Persistent sessions with SQLite' },
       memory: { status: 'enabled', note: 'Conversation context & summaries' },
-      voice: { status: 'placeholder', note: 'UI only' }
+      voice: { 
+        status: isSpeechEnabled ? 'enabled' : 'disabled',
+        note: isSpeechEnabled ? 'Azure Speech Services (STT + TTS)' : 'API key not configured'
+      }
     }
   });
 });
@@ -158,6 +165,116 @@ app.post('/api/calls/:id/end', (req, res) => {
     return res.status(404).json({ error: 'Call not found' });
   }
   res.json(call);
+});
+
+// Voice call processing: STT -> AI -> TTS
+app.post('/api/calls/:id/process', async (req, res) => {
+  const startTime = Date.now();
+  const { audioBase64, sessionId } = req.body;
+  
+  if (!audioBase64) {
+    return res.status(400).json({ error: 'Audio data required' });
+  }
+  
+  try {
+    const { getSpeechService } = require('./backend/services/speechService');
+    const { getProviderManager } = require('./providers');
+    const speechService = getSpeechService();
+    const aiProvider = getProviderManager();
+    
+    if (!speechService.isEnabled()) {
+      return res.status(503).json({ error: 'Azure Speech Service not configured' });
+    }
+    
+    // Decode audio from base64
+    const audioBuffer = Buffer.from(audioBase64, 'base64');
+    console.log(`[Voice] Processing ${audioBuffer.length} bytes of audio`);
+    
+    // Step 1: Speech-to-Text
+    console.log('[Voice] Step 1: Speech-to-Text...');
+    const sttResult = await speechService.recognizeOnce(audioBuffer);
+    const userTranscript = sttResult.text;
+    
+    if (!userTranscript) {
+      return res.status(200).json({
+        transcript: '',
+        aiResponse: '',
+        audioBase64: '',
+        error: 'No speech detected'
+      });
+    }
+    
+    console.log(`[Voice] User said: "${userTranscript}"`);
+    
+    // Save user message to session if provided
+    if (sessionId) {
+      messageService.addMessage(sessionId, 'user', userTranscript);
+    }
+    
+    // Step 2: Get conversation context
+    let context = [];
+    if (sessionId) {
+      context = await memory.buildContext(sessionId);
+    }
+    
+    // Step 3: Send to AI provider
+    console.log('[Voice] Step 2: Sending to AI...');
+    const aiResult = await aiProvider.sendMessage(userTranscript, { 
+      context,
+      streaming: false 
+    });
+    
+    const aiResponse = aiResult.content;
+    console.log(`[Voice] AI response: "${aiResponse.slice(0, 100)}..."`);
+    
+    // Save AI message to session
+    let aiMessage = null;
+    if (sessionId) {
+      aiMessage = messageService.addMessage(sessionId, 'assistant', aiResponse, {
+        provider: aiResult.provider,
+        latency: Date.now() - startTime,
+        usage: aiResult.usage
+      });
+    }
+    
+    // Step 4: Text-to-Speech
+    console.log('[Voice] Step 3: Text-to-Speech...');
+    const ttsResult = await speechService.textToSpeechBuffer(aiResponse);
+    
+    const duration = Math.floor((Date.now() - startTime) / 1000);
+    
+    // Update call record
+    callService.updateCallResult(req.params.id, {
+      transcript: userTranscript,
+      aiResponse,
+      duration,
+      metadata: {
+        sttDuration: sttResult.duration,
+        aiLatency: Date.now() - startTime,
+        aiTokens: aiResult.usage,
+        aiMessageId: aiMessage?.id
+      }
+    });
+    
+    console.log(`[Voice] Complete: ${duration}s`);
+    
+    // Return results
+    res.json({
+      transcript: userTranscript,
+      aiResponse,
+      audioBase64: ttsResult.audioBase64,
+      format: ttsResult.format,
+      duration,
+      usage: aiResult.usage
+    });
+    
+  } catch (err) {
+    console.error('[Voice] Processing error:', err);
+    res.status(500).json({ 
+      error: 'Voice processing failed',
+      message: err.message 
+    });
+  }
 });
 
 app.get('/api/sessions/:id/calls', (req, res) => {

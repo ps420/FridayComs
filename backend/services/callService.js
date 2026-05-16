@@ -186,6 +186,42 @@ class CallService {
       createdAt: row.created_at
     };
   }
+
+  // Update call with voice processing results
+  updateCallResult(callId, { transcript, aiResponse, audioUrl, duration, metadata = {} }) {
+    const now = Date.now();
+    
+    const stmt = this.db.prepare(`
+      UPDATE calls 
+      SET transcript = ?,
+          metadata = ?,
+          duration = ?,
+          audio_url = ?,
+          ended_at = ?
+      WHERE id = ?
+    `);
+    
+    const meta = JSON.stringify({
+      ...metadata,
+      aiResponse,
+      processedAt: now
+    });
+    
+    stmt.run(transcript, meta, duration, audioUrl, now, callId);
+    
+    const call = this.rowToCall({
+      id: callId,
+      transcript,
+      metadata: meta,
+      duration,
+      audio_url: audioUrl,
+      ended_at: now
+    });
+    
+    console.log(`[Call] Updated with result: ${callId}, transcript: ${transcript?.slice(0, 50)}...`);
+    
+    return call;
+  }
 }
 
 // Auto-init on first use

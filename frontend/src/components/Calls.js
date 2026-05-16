@@ -2,14 +2,16 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './Calls.css';
 
 function Calls({ sessionId }) {
-  const [callStatus, setCallStatus] = useState('idle'); // idle, calling, active, ended
+  const [callStatus, setCallStatus] = useState('idle'); // idle, recording, processing, playing, ended
   const [callDuration, setCallDuration] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
-  const [isSpeaker, setIsSpeaker] = useState(true);
   const [audioLevel, setAudioLevel] = useState(0);
-  const [transcript, setTranscript] = useState('');
+  const [userTranscript, setUserTranscript] = useState('');
+  const [aiResponse, setAiResponse] = useState('');
   const [callHistory, setCallHistory] = useState([]);
   const [activeCallId, setActiveCallId] = useState(null);
+  const [error, setError] = useState(null);
+  const [processingStep, setProcessingStep] = useState('');
   
   const mediaRecorder = useRef(null);
   const audioChunks = useRef([]);
@@ -17,33 +19,52 @@ function Calls({ sessionId }) {
   const analyser = useRef(null);
   const audioContext = useRef(null);
   const animationFrame = useRef(null);
+  const audioPlayer = useRef(new Audio());
 
   // Load call history
   useEffect(() => {
     if (sessionId) {
-      fetch(`/api/sessions/${sessionId}/calls`)
-        .then(res => res.json())
-        .then(data => setCallHistory(data))
-        .catch(console.error);
+      loadCallHistory();
     }
   }, [sessionId]);
 
-  // Start a call
-  const startCall = useCallback(async () => {
+  const loadCallHistory = async () => {
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/calls`);
+      const data = await res.json();
+      setCallHistory(data);
+    } catch (err) {
+      console.error('Failed to load call history:', err);
+    }
+  };
+
+  // Start recording
+  const startRecording = useCallback(async () => {
     if (!sessionId) {
-      alert('Please start a chat session first');
+      setError('Please start a chat session first');
       return;
     }
 
+    setError(null);
+
     try {
-      // Initialize audio context
-      audioContext.current = new (window.AudioContext || window.webkitAudioContext)();
+      // Create call on backend first
+      const callRes = await fetch('/api/calls', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, callType: 'voice' })
+      });
       
+      const callData = await callRes.json();
+      setActiveCallId(callData.id);
+
       // Get microphone access
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
-      // Create media recorder
-      mediaRecorder.current = new MediaRecorder(stream);
+      // Create media recorder - use webm/opus for best compatibility
+      mediaRecorder.current = new MediaRecorder(stream, {
+        mimeType: 'audio/webm;codecs=opus'
+      });
       audioChunks.current = [];
       
       mediaRecorder.current.ondataavailable = (event) => {
@@ -52,16 +73,13 @@ function Calls({ sessionId }) {
         }
       };
       
-      mediaRecorder.current.onstop = () => {
+      mediaRecorder.current.onstop = async () => {
         const audioBlob = new Blob(audioChunks.current, { type: 'audio/webm' });
-        // In full implementation, send to backend for processing
-        console.log('Recording stopped, blob size:', audioBlob.size);
+        await processVoiceCall(audioBlob, callData.id);
       };
       
-      // Start recording
-      mediaRecorder.current.start(1000); // Collect data every second
-      
       // Set up audio visualization
+      audioContext.current = new (window.AudioContext || window.webkitAudioContext)();
       const source = audioContext.current.createMediaStreamSource(stream);
       analyser.current = audioContext.current.createAnalyser();
       analyser.current.fftSize = 256;
@@ -69,36 +87,21 @@ function Calls({ sessionId }) {
       
       visualizeAudio();
       
-      // Update UI
-      setCallStatus('active');
-      setCallDuration(0);
+      // Start recording
+      mediaRecorder.current.start();
+      setCallStatus('recording');
+      setUserTranscript('');
+      setAiResponse('');
       
       // Start duration timer
+      const startTime = Date.now();
       callTimer.current = setInterval(() => {
-        setCallDuration(prev => prev + 1);
+        setCallDuration(Math.floor((Date.now() - startTime) / 1000));
       }, 1000);
       
-      // Create call on backend
-      const response = await fetch('/api/calls', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, callType: 'voice' })
-      });
-      
-      const callData = await response.json();
-      setActiveCallId(callData.id);
-      
-      // Simulate AI speaking after delay
-      setTimeout(() => {
-        if (mediaRecorder.current && mediaRecorder.current.state === 'recording') {
-          playGreeting();
-        }
-      }, 2000);
-      
     } catch (err) {
-      console.error('Failed to start call:', err);
-      alert('Could not access microphone. Please check permissions.');
-      endCall();
+      console.error('Failed to start recording:', err);
+      setError(err.message || 'Could not access microphone');
     }
   }, [sessionId]);
 
@@ -123,21 +126,12 @@ function Calls({ sessionId }) {
     draw();
   };
 
-  // Play greeting (placeholder for AI voice)
-  const playGreeting = () => {
-    const utterance = new SpeechSynthesisUtterance('Hello Zayan, this is Friday. I can hear you loud and clear!');
-    utterance.rate = 1;
-    utterance.pitch = 1;
-    window.speechSynthesis.speak(utterance);
-    
-    setTranscript('Friday: Hello Zayan, this is Friday. I can hear you loud and clear!');
-  };
-
-  // End call
-  const endCall = useCallback(async () => {
-    // Stop recording
+  // Stop recording and process
+  const stopRecording = useCallback(() => {
     if (mediaRecorder.current && mediaRecorder.current.state === 'recording') {
       mediaRecorder.current.stop();
+      
+      // Stop all tracks
       mediaRecorder.current.stream.getTracks().forEach(track => track.stop());
     }
     
@@ -157,44 +151,92 @@ function Calls({ sessionId }) {
     }
     
     setAudioLevel(0);
-    setCallStatus('ended');
+    setCallStatus('processing');
+  }, []);
+
+  // Process voice call: send to backend for STT -> AI -> TTS
+  const processVoiceCall = async (audioBlob, callId) => {
+    setProcessingStep('Converting speech to text...');
     
-    // End call on backend
-    if (activeCallId) {
-      await fetch(`/api/calls/${activeCallId}/end`, {
+    try {
+      // Convert blob to base64
+      const arrayBuffer = await audioBlob.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      const base64Audio = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+      
+      setProcessingStep('Sending to Friday...');
+      
+      // Send to backend
+      const response = await fetch(`/api/calls/${callId}/process`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript })
+        body: JSON.stringify({
+          audioBase64: base64Audio,
+          sessionId
+        })
       });
       
-      // Refresh history
-      const history = await fetch(`/api/sessions/${sessionId}/calls`).then(r => r.json());
-      setCallHistory(history);
+      const result = await response.json();
+      
+      if (result.error) {
+        setError(result.error);
+        setCallStatus('ended');
+        return;
+      }
+      
+      setUserTranscript(result.transcript);
+      setAiResponse(result.aiResponse);
+      
+      // Play audio response
+      if (result.audioBase64) {
+        setProcessingStep('Playing response...');
+        setCallStatus('playing');
+        
+        // Create audio from base64
+        const audioSrc = `data:${result.format};base64,${result.audioBase64}`;
+        audioPlayer.current.src = audioSrc;
+        
+        audioPlayer.current.onended = () => {
+          setCallStatus('ended');
+          loadCallHistory(); // Refresh history
+        };
+        
+        await audioPlayer.current.play();
+      } else {
+        setCallStatus('ended');
+      }
+      
+    } catch (err) {
+      console.error('Processing failed:', err);
+      setError(err.message);
+      setCallStatus('ended');
+    }
+  };
+
+  // End call/cleanup
+  const endCall = useCallback(() => {
+    // Stop any playing audio
+    if (audioPlayer.current) {
+      audioPlayer.current.pause();
+      audioPlayer.current.currentTime = 0;
+    }
+    
+    // Send end signal to backend
+    if (activeCallId) {
+      fetch(`/api/calls/${activeCallId}/end`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcript: userTranscript })
+      }).catch(console.error);
     }
     
     setActiveCallId(null);
-    setTranscript('');
-    
-    // Reset after delay
-    setTimeout(() => {
-      setCallStatus('idle');
-      setCallDuration(0);
-    }, 3000);
-  }, [activeCallId, sessionId, transcript]);
-
-  // Toggle mute
-  const toggleMute = () => {
-    if (mediaRecorder.current && mediaRecorder.current.stream) {
-      const audioTrack = mediaRecorder.current.stream.getAudioTracks()[0];
-      audioTrack.enabled = !audioTrack.enabled;
-      setIsMuted(!isMuted);
-    }
-  };
-
-  // Toggle speaker
-  const toggleSpeaker = () => {
-    setIsSpeaker(!isSpeaker);
-  };
+    setCallStatus('ended');
+    setCallDuration(0);
+    setAudioLevel(0);
+    setProcessingStep('');
+    loadCallHistory();
+  }, [activeCallId, userTranscript]);
 
   // Format duration
   const formatDuration = (seconds) => {
@@ -203,69 +245,119 @@ function Calls({ sessionId }) {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Reset to idle
+  const reset = () => {
+    setCallStatus('idle');
+    setUserTranscript('');
+    setAiResponse('');
+    setError(null);
+    setProcessingStep('');
+  };
+
   return (
     <div className="calls-container">
-      {/* Active Call Interface */}
-      {(callStatus === 'active' || callStatus === 'calling') && (
-        <div className="active-call-overlay">
-          <div className="call-status">
-            {callStatus === 'calling' ? 'Calling...' : 'On Call'}
-          </div>
-          
-          <div className="call-avatar">
-            <div className="avatar-ring" style={{ transform: `scale(${1 + audioLevel * 0.3})` }}>
-              <span>F</span>
-            </div>
-            <div className="audio-waves">
-              {[...Array(5)].map((_, i) => (
-                <div 
-                  key={i} 
-                  className="wave"
-                  style={{ 
-                    height: `${20 + audioLevel * 60 + Math.random() * 20}px`,
-                    animationDelay: `${i * 0.1}s`
-                  }}
-                />
-              ))}
-            </div>
-          </div>
-          
-          <div className="call-info">
-            <div className="call-name">Friday AI</div>
-            <div className="call-timer">{formatDuration(callDuration)}</div>
-          </div>
+      {/* Error display */}
+      {error && (
+        <div className="error-banner">
+          ⚠️ {error}
+          <button onClick={() => setError(null)}>✕</button>
+        </div>
+      )}
 
-          {transcript && (
-            <div className="transcript-box">
-              <p>{transcript}</p>
-            </div>
+      {/* Recording/Processing/Playing Overlay */}
+      {(callStatus === 'recording' || callStatus === 'processing' || callStatus === 'playing') && (
+        <div className="active-call-overlay">
+          {/* Recording state */}
+          {callStatus === 'recording' && (
+            <>
+              <div className="call-status recording">
+                <span className="recording-dot"></span>
+                Recording...
+              </div>
+              
+              <div className="call-avatar">
+                <div className="avatar-ring" style={{ transform: `scale(${1 + audioLevel * 0.3})` }}>
+                  <span>🎤</span>
+                </div>
+                <div className="audio-waves">
+                  {[...Array(5)].map((_, i) => (
+                    <div 
+                      key={i} 
+                      className="wave"
+                      style={{ 
+                        height: `${20 + audioLevel * 60 + Math.random() * 20}px`,
+                        animationDelay: `${i * 0.1}s`
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+              
+              <div className="call-info">
+                <div className="call-name">Listening...</div>
+                <div className="call-timer">{formatDuration(callDuration)}</div>
+              </div>
+
+              <button className="control-btn end-call large" onClick={stopRecording}>
+                ⏹ Stop Recording
+              </button>
+              
+              <p className="hint">Tap to stop and send to Friday</p>
+            </>
           )}
 
-          <div className="call-controls">
-            <button 
-              className={`control-btn ${isMuted ? 'active' : ''}`}
-              onClick={toggleMute}
-              title={isMuted ? 'Unmute' : 'Mute'}
-            >
-              {isMuted ? '🔇' : '🎤'}
-            </button>
-            
-            <button 
-              className="control-btn end-call"
-              onClick={endCall}
-              title="End Call"
-            >
-              📞
-            </button>
-            
-            <button 
-              className={`control-btn ${isSpeaker ? 'active' : ''}`}
-              onClick={toggleSpeaker}
-              title="Speaker"
-            >
-              🔊
-            </button>
-          </div>
+          {/* Processing state */}
+          {callStatus === 'processing' && (
+            <>
+              <div className="call-status processing">
+                <div className="spinner"></div>
+                {processingStep}
+              </div>
+              
+              <div className="processing-steps">
+                <div className={`step ${processingStep.includes('speech') ? 'active' : 'done'}`}>
+                  1. Speech-to-Text
+                </div>
+                <div className={`step ${processingStep.includes('Sending') ? 'active' : ''}`}>
+                  2. AI Thinking
+                </div>
+                <div className={`step ${processingStep.includes('playing') ? 'active' : ''}`}>
+                  3. Text-to-Speech
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* Playing state */}
+          {callStatus === 'playing' && (
+            <>
+              <div className="call-status playing">
+                🔊 Playing Response
+              </div>
+              
+              <div className="avatar-ring playing">
+                <span>F</span>
+              </div>
+              
+              {userTranscript && (
+                <div className="transcript-box">
+                  <div className="transcript-label">You said:</div>
+                  <p>{userTranscript}</p>
+                </div>
+              )}
+              
+              {aiResponse && (
+                <div className="transcript-box ai">
+                  <div className="transcript-label">Friday:</div>
+                  <p>{aiResponse}</p>
+                </div>
+              )}
+
+              <button className="control-btn end-call" onClick={endCall}>
+                📞 End
+              </button>
+            </>
+          )}
         </div>
       )}
 
@@ -273,46 +365,64 @@ function Calls({ sessionId }) {
       {callStatus === 'ended' && (
         <div className="call-ended">
           <div className="ended-icon">📞</div>
-          <h3>Call Ended</h3>
-          <p>Duration: {formatDuration(callDuration)}</p>
-          <button className="new-call-btn" onClick={() => setCallStatus('idle')}>
+          <h3>Call Complete</h3>
+          
+          {userTranscript && (
+            <div className="call-summary">
+              <div className="summary-section">
+                <label>You said:</label>
+                <p>{userTranscript}</p>
+              </div>
+              <div className="summary-section">
+                <label>Friday replied:</label>
+                <p>{aiResponse}</p>
+              </div>
+            </div>
+          )}
+          
+          <button className="new-call-btn" onClick={reset}>
             New Call
           </button>
         </div>
       )}
 
-      {/* Dialer / Call History */}
+      {/* Idle: Dialer / Call History */}
       {callStatus === 'idle' && (
         <>
           <div className="dialer-section">
             <div className="dialer-header">
               <h2>Voice Call</h2>
-              <p>Call Friday directly with voice</p>
+              <p>Press & hold to speak, Friday will respond with voice</p>
             </div>
 
             <div className="call-button-container">
-              <button className="big-call-btn" onClick={startCall}>
-                <span className="call-icon">📞</span>
-                <span className="call-text">Call Friday</span>
+              <button 
+                className="big-call-btn" 
+                onClick={startRecording}
+                disabled={!sessionId}
+              >
+                <span className="call-icon">🎤</span>
+                <span className="call-text">Press to Speak</span>
               </button>
             </div>
 
-            <div className="quick-actions">
-              <button className="quick-btn">
-                <span>🎤</span>
-                Voice Message
-              </button>
-              <button className="quick-btn">
-                <span>📹</span>
-                Video (Soon)
-              </button>
+            <div className="voice-features">
+              <div className="feature-badge">
+                <span>🗣️</span> Azure Speech-to-Text
+              </div>
+              <div className="feature-badge">
+                <span>🤖</span> Azure OpenAI
+              </div>
+              <div className="feature-badge">
+                <span>🔊</span> Azure Text-to-Speech
+              </div>
             </div>
           </div>
 
           <div className="call-history">
-            <h3>Recent Calls</h3>
+            <h3>Recent Voice Calls</h3>
             {callHistory.length === 0 ? (
-              <p className="no-calls">No calls yet. Start your first call!</p>
+              <p className="no-calls">No calls yet. Start your first voice conversation!</p>
             ) : (
               <div className="call-list">
                 {callHistory.map(call => (
@@ -322,21 +432,24 @@ function Calls({ sessionId }) {
                     </div>
                     <div className="call-details">
                       <div className="call-title">
-                        {call.callType === 'voice' ? 'Voice Call' : 'Video Call'}
+                        {call.transcript 
+                          ? `"${call.transcript.slice(0, 40)}${call.transcript.length > 40 ? '...' : ''}"`
+                          : 'Voice Call'
+                        }
                       </div>
                       <div className="call-meta">
-                        {call.status === 'ended' 
+                        {call.duration > 0 
                           ? `${formatDuration(call.duration)} • ${new Date(call.createdAt).toLocaleDateString()}`
-                          : call.status
+                          : new Date(call.createdAt).toLocaleDateString()
                         }
                       </div>
                     </div>
                     <div className="call-actions">
                       <button 
                         className="call-again-btn"
-                        onClick={startCall}
+                        onClick={startRecording}
                       >
-                        📞
+                        🎤
                       </button>
                     </div>
                   </div>
