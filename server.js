@@ -88,6 +88,115 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Azure Speech Health Check
+app.get('/api/voice/health', async (req, res) => {
+  const { getSpeechService } = require('./backend/services/speechService');
+  const speechService = getSpeechService();
+  
+  const key = process.env.AZURE_SPEECH_KEY;
+  const region = process.env.AZURE_SPEECH_REGION;
+  
+  const result = {
+    timestamp: new Date().toISOString(),
+    configured: {
+      key: !!(key && key !== 'your_speech_key_here'),
+      region: region || 'not set',
+      keyLast4: key && key !== 'your_speech_key_here' ? key.slice(-4) : null
+    },
+    speechService: {
+      enabled: speechService.isEnabled(),
+      ffmpegAvailable: speechService.ffmpegAvailable || false
+    },
+    connection: {
+      tested: false,
+      success: false,
+      error: null,
+      latencyMs: null
+    },
+    lastError: null
+  };
+  
+  if (!result.configured.key) {
+    return res.json({
+      ...result,
+      status: 'not_configured',
+      message: 'AZURE_SPEECH_KEY not set'
+    });
+  }
+  
+  // Test actual connection
+  const startTime = Date.now();
+  try {
+    const sdk = require('microsoft-cognitiveservices-speech-sdk');
+    const speechConfig = sdk.SpeechConfig.fromSubscription(key, region);
+    speechConfig.speechRecognitionLanguage = 'en-US';
+    
+    // Create minimal audio input (empty WAV)
+    const audioConfig = sdk.AudioConfig.fromWavFileInput(Buffer.alloc(44 + 16000));
+    const recognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
+    
+    let connected = false;
+    let sdkError = null;
+    
+    recognizer.sessionStarted = () => {
+      connected = true;
+    };
+    
+    recognizer.canceled = (s, e) => {
+      // 1006 = WebSocket error, usually means connection failed
+      if (e.errorCode === sdk.CancellationErrorCode.ConnectionFailure) {
+        sdkError = `Connection failed: ${e.errorDetails}`;
+      }
+    };
+    
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        recognizer.close();
+        reject(new Error('Connection timeout (10s)'));
+      }, 10000);
+      
+      recognizer.recognizeOnceAsync(
+        (result) => {
+          clearTimeout(timeout);
+          recognizer.close();
+          resolve(result);
+        },
+        (err) => {
+          clearTimeout(timeout);
+          recognizer.close();
+          reject(err);
+        }
+      );
+    });
+    
+    result.connection.tested = true;
+    result.connection.success = connected;
+    result.connection.latencyMs = Date.now() - startTime;
+    
+    if (!connected && sdkError) {
+      result.connection.error = sdkError;
+    }
+    
+    res.json({
+      ...result,
+      status: connected ? 'healthy' : 'connection_failed',
+      message: connected ? 'Azure Speech connected successfully' : 'Failed to connect to Azure Speech'
+    });
+    
+  } catch (err) {
+    result.connection.tested = true;
+    result.connection.success = false;
+    result.connection.error = err.message;
+    result.connection.latencyMs = Date.now() - startTime;
+    
+    res.json({
+      ...result,
+      status: 'error',
+      message: err.message
+    });
+  }
+});
+
 // Session endpoints
 app.post('/api/sessions', (req, res) => {
   const { title, userId = req.userId } = req.body;
