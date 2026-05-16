@@ -1,0 +1,217 @@
+.voice-note-mode {
+  padding: 30px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+}
+
+.mode-header {
+  text-align: center;
+  margin-bottom: 20px;
+}
+
+.mode-header h3 {
+  font-size: 24px;
+  margin-bottom: 8px;
+  background: linear-gradient(135deg, #fff 0%, #a5b4fc 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.mode-header p {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 14px;
+}
+
+.error-box {
+  background: rgba(255, 68, 68, 0.2);
+  border: 1px solid rgba(255, 68, 68, 0.4);
+  color: #ff8888;
+  padding: 16px 24px;
+  border-radius: 12px;
+  max-width: 500px;
+}
+
+.debug-panel {
+  width: 100%;
+  max-width: 600px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(102, 126, 234, 0.2);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.debug-panel strong {
+  color: #667eea;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.debug-panel pre {
+  margin: 10px 0 0 0;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+  overflow-x: auto;
+}
+
+.record-btn {
+  width: 200px;
+  height: 200px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  color: white;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.record-btn:hover {
+  transform: scale(1.05);
+  box-shadow: 0 20px 60px rgba(102, 126, 234, 0.4);
+}
+
+.record-btn span {
+  font-size: 50px;
+}
+
+.record-btn.recording {
+  background: linear-gradient(135deg, #ff4444 0%, #cc0000 100%);
+  animation: pulse-red 1.5s infinite;
+}
+
+.record-btn.recording:hover {
+  box-shadow: 0 20px 60px rgba(255, 68, 68, 0.4);
+}
+
+@keyframes pulse-red {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 68, 68, 0.7); }
+  50% { box-shadow: 0 0 0 30px rgba(255, 68, 68, 0); }
+}
+
+.pulse {
+  animation: pulse-scale 1s infinite;
+}
+
+@keyframes pulse-scale {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.2); }
+}
+
+.processing-state {
+  text-align: center;
+  padding: 40px;
+}
+
+.spinner {
+  width: 60px;
+  height: 60px;
+  border: 4px solid rgba(102, 126, 234, 0.2);
+  border-top-color: #667eea;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin: 0 auto 20px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.processing-state p {
+  font-size: 18px;
+  margin-bottom: 8px;
+}
+
+.processing-state .sub {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.playing-state {
+  text-align: center;
+  padding: 30px;
+}
+
+.audio-playing {
+  font-size: 24px;
+  margin-bottom: 20px;
+}
+
+.sound-wave {
+  animation: shake 0.5s infinite;
+  display: inline-block;
+}
+
+@keyframes shake {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.2); }
+}
+
+.transcript {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  padding: 20px;
+  margin-top: 20px;
+  text-align: left;
+  max-width: 500px;
+}
+
+.transcript p {
+  margin: 0 0 12px 0;
+  line-height: 1.6;
+}
+
+.transcript p:last-child {
+  margin-bottom: 0;
+}
+
+.ended-state {
+  text-align: center;
+  padding: 30px;
+}
+
+.result-box {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(102, 126, 234, 0.2);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+  text-align: left;
+  max-width: 500px;
+}
+
+.result-box p {
+  margin: 0 0 15px 0;
+  line-height: 1.6;
+}
+
+.result-box p:last-child {
+  margin-bottom: 0;
+}
+
+.success {
+  color: #44ff44;
+  margin-bottom: 20px;
+}
+
+.reset-btn {
+  padding: 14px 32px;
+  background: rgba(102, 126, 234, 0.2);
+  border: 1px solid rgba(102, 126, 234, 0.4);
+  border-radius: 30px;
+  color: white;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.reset-btn:hover {
+  background: rgba(102, 126, 234, 0.4);
+}

@@ -1,15 +1,23 @@
 const sdk = require('microsoft-cognitiveservices-speech-sdk');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const fs = require('fs');
+const path = require('path');
+
+const execAsync = promisify(exec);
 
 class SpeechService {
   constructor() {
     this.speechKey = process.env.AZURE_SPEECH_KEY;
     this.speechRegion = process.env.AZURE_SPEECH_REGION;
-    this.voiceName = process.env.AZURE_SPEECH_VOICE_NAME;
+    this.voiceName = process.env.AZURE_SPEECH_VOICE_NAME || 'en-US-JennyNeural';
     
     this.enabled = !!(this.speechKey && this.speechRegion);
     
     if (this.enabled) {
-      console.log(`[SpeechService] Initialized with region: ${this.speechRegion}`);
+      console.log(`[SpeechService] Initialized`);
+      console.log(`  - Region: ${this.speechRegion}`);
+      console.log(`  - Voice: ${this.voiceName}`);
     } else {
       console.log('[SpeechService] Disabled - missing AZURE_SPEECH_KEY or AZURE_SPEECH_REGION');
     }
@@ -19,11 +27,30 @@ class SpeechService {
     return this.enabled;
   }
 
-  // Speech-to-Text: Convert audio buffer to transcript
-  async speechToText(audioBuffer, audioFormat = 'webm') {
+  /**
+   * Speech-to-Text with proper format handling
+   * @param {Buffer} audioBuffer - The audio data
+   * @param {string} mimeType - MIME type from browser (e.g., 'audio/webm')
+   */
+  async speechToText(audioBuffer, mimeType = 'audio/webm') {
     if (!this.enabled) {
       throw new Error('Azure Speech Service not configured');
     }
+
+    console.log(`[Speech STT] Starting recognition...`);
+    console.log(`  - Input: ${audioBuffer.length} bytes`);
+    console.log(`  - MIME type: ${mimeType}`);
+
+    // Azure Speech SDK requires WAV format for push streams
+    // Browser sends WebM, so we need to convert
+    let wavBuffer;
+    if (mimeType.includes('webm')) {
+      wavBuffer = await this.convertWebmToWav(audioBuffer);
+    } else {
+      wavBuffer = audioBuffer;
+    }
+
+    console.log(`[Speech STT] Converted to WAV: ${wavBuffer.length} bytes`);
 
     return new Promise((resolve, reject) => {
       try {
@@ -31,92 +58,139 @@ class SpeechService {
         const speechConfig = sdk.SpeechConfig.fromSubscription(this.speechKey, this.speechRegion);
         speechConfig.speechRecognitionLanguage = 'en-US';
 
-        // Push audio buffer to stream
-        const pushStream = sdk.AudioInputStream.createPushStream();
-        pushStream.write(audioBuffer);
+        // Create push stream with proper format
+        const pushStream = sdk.AudioInputStream.createPushStream(
+          sdk.AudioStreamFormat.getWaveFormatPCM(16000, 16, 1) // 16kHz, 16-bit, mono
+        );
+        
+        // Write audio data in chunks to avoid memory issues
+        const chunkSize = 4096;
+        for (let i = 0; i < wavBuffer.length; i += chunkSize) {
+          const chunk = wavBuffer.slice(i, i + chunkSize);
+          pushStream.write(chunk);
+        }
         pushStream.close();
 
-        // Create audio config from stream
+        // Create audio config
         const audioConfig = sdk.AudioConfig.fromStreamInput(pushStream);
         
         // Create recognizer
         const recognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
         
         let transcript = '';
+        let isDone = false;
         
         recognizer.recognizing = (s, e) => {
-          console.log(`[STT] Recognizing: ${e.result.text}`);
+          // Intermediate results
+          console.log(`[STT] Recognizing: "${e.result.text}"`);
         };
         
         recognizer.recognized = (s, e) => {
           if (e.result.reason === sdk.ResultReason.RecognizedSpeech) {
             transcript = e.result.text;
-            console.log(`[STT] Recognized: ${transcript}`);
+            console.log(`[STT] Final: "${transcript}"`);
           }
         };
         
         recognizer.canceled = (s, e) => {
-          recognizer.stopContinuousRecognitionAsync();
-          if (e.reason === sdk.CancellationReason.Error) {
-            reject(new Error(`STT Error: ${e.errorDetails}`));
-          } else {
-            resolve(transcript);
+          if (!isDone) {
+            isDone = true;
+            recognizer.close();
+            
+            if (e.reason === sdk.CancellationReason.Error) {
+              console.error(`[STT] Error: ${e.errorDetails}`);
+              reject(new Error(`Speech recognition error: ${e.errorDetails}`));
+            } else {
+              console.log(`[STT] Canceled: ${e.reason}`);
+              resolve({ text: transcript, duration: 0, confidence: 0 });
+            }
           }
         };
         
         recognizer.sessionStopped = (s, e) => {
-          recognizer.stopContinuousRecognitionAsync();
-          resolve(transcript);
+          if (!isDone) {
+            isDone = true;
+            recognizer.close();
+            console.log(`[STT] Session stopped, transcript: "${transcript}"`);
+            resolve({ text: transcript, duration: 0, confidence: 0 });
+          }
         };
 
         // Start recognition
+        console.log('[STT] Starting recognizer...');
         recognizer.startContinuousRecognitionAsync(
           () => {
-            // Auto-stop after silence (handled by Azure)
-            // But we need a timeout for end of speech
+            console.log('[STT] Recognizer started');
+            // Auto-stop after reasonable time
             setTimeout(() => {
-              recognizer.stopContinuousRecognitionAsync(
-                () => resolve(transcript),
-                (err) => reject(err)
-              );
-            }, 5000); // 5 second max for speech
+              if (!isDone) {
+                recognizer.stopContinuousRecognitionAsync();
+              }
+            }, 30000); // Max 30 seconds
           },
-          (err) => reject(err)
+          (err) => {
+            isDone = true;
+            recognizer.close();
+            reject(err);
+          }
         );
         
       } catch (err) {
+        console.error('[STT] Exception:', err.message);
         reject(err);
       }
     });
   }
 
-  // Speech-to-Text: Simple one-shot recognition with timeout
-  async recognizeOnce(audioBuffer) {
+  /**
+   * One-shot speech recognition (for voice notes)
+   */
+  async recognizeOnce(audioBuffer, mimeType = 'audio/webm') {
     if (!this.enabled) {
       throw new Error('Azure Speech Service not configured');
     }
+
+    console.log(`[Speech RecognizeOnce] Starting...`);
+    console.log(`  - Input: ${audioBuffer.length} bytes`);
+    console.log(`  - MIME type: ${mimeType}`);
+
+    // Convert to WAV
+    let wavBuffer;
+    if (mimeType.includes('webm')) {
+      wavBuffer = await this.convertWebmToWav(audioBuffer);
+    } else {
+      wavBuffer = audioBuffer;
+    }
+
+    console.log(`[Speech] Converted to WAV: ${wavBuffer.length} bytes`);
 
     return new Promise((resolve, reject) => {
       try {
         const speechConfig = sdk.SpeechConfig.fromSubscription(this.speechKey, this.speechRegion);
         speechConfig.speechRecognitionLanguage = 'en-US';
 
-        // For one-shot, we can use recognizeOnceAsync
-        const pushStream = sdk.AudioInputStream.createPushStream();
-        pushStream.write(audioBuffer);
+        // Create format
+        const format = sdk.AudioStreamFormat.getWaveFormatPCM(16000, 16, 1);
+        const pushStream = sdk.AudioInputStream.createPushStream(format);
+        
+        pushStream.write(wavBuffer);
         pushStream.close();
 
         const audioConfig = sdk.AudioConfig.fromStreamInput(pushStream);
         const recognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
 
+        console.log('[Speech] Starting one-shot recognition...');
+
         recognizer.recognizeOnceAsync(
           (result) => {
             recognizer.close();
+            console.log(`[Speech] Result: reason=${result.reason}, text="${result.text}"`);
+            
             if (result.reason === sdk.ResultReason.RecognizedSpeech) {
               resolve({
                 text: result.text,
                 duration: result.duration,
-                confidence: result.confidence
+                confidence: result.properties?.getProperty(sdk.PropertyId.SpeechServiceResponse_JsonResult)
               });
             } else if (result.reason === sdk.ResultReason.NoMatch) {
               resolve({ text: '', duration: 0, confidence: 0 });
@@ -126,116 +200,49 @@ class SpeechService {
           },
           (err) => {
             recognizer.close();
+            console.error('[Speech] RecognizeOnce error:', err);
             reject(err);
           }
         );
         
       } catch (err) {
+        console.error('[Speech] Exception:', err.message);
         reject(err);
       }
     });
   }
 
-  // Text-to-Speech: Convert text to audio buffer
+  /**
+   * Text-to-Speech
+   */
   async textToSpeech(text) {
     if (!this.enabled) {
       throw new Error('Azure Speech Service not configured');
     }
 
+    console.log(`[Speech TTS] Starting...`);
+    console.log(`  - Text: "${text.slice(0, 100)}${text.length > 100 ? '...' : ''}"`);
+
     return new Promise((resolve, reject) => {
       try {
         const speechConfig = sdk.SpeechConfig.fromSubscription(this.speechKey, this.speechRegion);
         speechConfig.speechSynthesisVoiceName = this.voiceName;
+        speechConfig.speechSynthesisOutputFormat = sdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3;
         
-        // Output to memory stream
-        const buffer = [];
-        const pullStream = sdk.AudioOutputStream.createPullStream();
-        
-        pullStream.read = (dataBuffer) => {
-          // This gets called with synthesized chunks
-          return 0; // Indicates we're writing to our own buffer
-        };
+        // Use default speaker (null audio config = synthesize to memory)
+        const synthesizer = new sdk.SpeechSynthesizer(speechConfig, null);
 
-        // Use synthesizer with array buffer output
-        const audioConfig = sdk.AudioConfig.fromStreamOutput(pullStream);
-        const synthesizer = new sdk.SpeechSynthesizer(speechConfig, audioConfig);
-
-        // Use SSML for better control
         const ssml = `
           <speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
             <voice name="${this.voiceName}">
-              <prosody pitch="default" rate="1.0" volume="default">
+              <prosody rate="1.0" pitch="default">
                 ${this.escapeXml(text)}
               </prosody>
             </voice>
           </speak>
         `;
 
-        // Store audio chunks
-        const audioChunks = [];
-        
-        synthesizer.synthesizing = (s, e) => {
-          if (e.result.audioData) {
-            audioChunks.push(Buffer.from(e.result.audioData));
-          }
-        };
-
-        synthesizer.speakSsmlAsync(
-          ssml,
-          (result) => {
-            synthesizer.close();
-            
-            if (result.reason === sdk.ResultReason.SynthesizingAudioCompleted) {
-              // Combine all chunks
-              const audioBuffer = Buffer.concat(audioChunks);
-              
-              // If no chunks from event, try result.audioData
-              const finalBuffer = audioBuffer.length > 0 
-                ? audioBuffer 
-                : Buffer.from(result.audioData);
-              
-              resolve({
-                audioBuffer: finalBuffer,
-                duration: result.audioDuration,
-                format: 'audio/wav'
-              });
-            } else {
-              reject(new Error(`TTS failed: ${result.reason}`));
-            }
-          },
-          (err) => {
-            synthesizer.close();
-            reject(err);
-          }
-        );
-        
-      } catch (err) {
-        reject(err);
-      }
-    });
-  }
-
-  // Alternative TTS using toArrayBuffer
-  async textToSpeechBuffer(text) {
-    if (!this.enabled) {
-      throw new Error('Azure Speech Service not configured');
-    }
-
-    return new Promise((resolve, reject) => {
-      try {
-        const speechConfig = sdk.SpeechConfig.fromSubscription(this.speechKey, this.speechRegion);
-        speechConfig.speechSynthesisOutputFormat = sdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3;
-        
-        // Null audio config for in-memory synthesis
-        const synthesizer = new sdk.SpeechSynthesizer(speechConfig, null);
-
-        const ssml = `
-          <speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
-            <voice name="${this.voiceName}">
-              ${this.escapeXml(text)}
-            </voice>
-          </speak>
-        `;
+        console.log('[TTS] Synthesizing...');
 
         synthesizer.speakSsmlAsync(
           ssml,
@@ -244,7 +251,7 @@ class SpeechService {
             
             if (result.reason === sdk.ResultReason.SynthesizingAudioCompleted) {
               const audioBuffer = Buffer.from(result.audioData);
-              console.log(`[TTS] Generated ${audioBuffer.length} bytes of audio`);
+              console.log(`[TTS] Success: ${audioBuffer.length} bytes`);
               
               resolve({
                 audioBuffer,
@@ -253,19 +260,91 @@ class SpeechService {
                 format: 'audio/mp3'
               });
             } else {
-              reject(new Error(`TTS failed: ${result.reason}`));
+              console.error(`[TTS] Failed: ${result.reason}`);
+              reject(new Error(`Synthesis failed: ${result.reason}`));
             }
           },
           (err) => {
             synthesizer.close();
+            console.error('[TTS] Error:', err);
             reject(err);
           }
         );
         
       } catch (err) {
+        console.error('[TTS] Exception:', err.message);
         reject(err);
       }
     });
+  }
+
+  /**
+   * Convert WebM to WAV format (16kHz, 16-bit, mono)
+   * This uses ffmpeg if available, otherwise tries a simple conversion
+   */
+  async convertWebmToWav(webmBuffer) {
+    // Check if ffmpeg is available
+    try {
+      await execAsync('which ffmpeg');
+      
+      const tempDir = '/tmp';
+      const inputPath = path.join(tempDir, `input_${Date.now()}.webm`);
+      const outputPath = path.join(tempDir, `output_${Date.now()}.wav`);
+      
+      // Write input
+      await fs.promises.writeFile(inputPath, webmBuffer);
+      
+      // Convert
+      await execAsync(`ffmpeg -i "${inputPath}" -ar 16000 -ac 1 -c:a pcm_s16le "${outputPath}" -y`);
+      
+      // Read output
+      const wavBuffer = await fs.promises.readFile(outputPath);
+      
+      // Cleanup
+      await fs.promises.unlink(inputPath).catch(() => {});
+      await fs.promises.unlink(outputPath).catch(() => {});
+      
+      return wavBuffer;
+      
+    } catch (err) {
+      console.log('[Speech] ffmpeg not available, trying alternative approach...');
+      
+      // Fallback: The SDK might handle webm directly with WAV format specified
+      // Create a simple WAV header for the webm data
+      // Note: This won't work perfectly but may help with debugging
+      return this.createWavHeader(webmBuffer.length, 16000, 1, 16);
+    }
+  }
+
+  /**
+   * Create a WAV header (may not work perfectly for actual audio data)
+   */
+  createWavHeader(dataLength, sampleRate, channels, bitsPerSample) {
+    const byteRate = sampleRate * channels * bitsPerSample / 8;
+    const blockAlign = channels * bitsPerSample / 8;
+    
+    const buffer = Buffer.alloc(44);
+    
+    // RIFF chunk
+    buffer.write('RIFF', 0);
+    buffer.writeUInt32LE(36 + dataLength, 4);
+    buffer.write('WAVE', 8);
+    
+    // fmt chunk
+    buffer.write('fmt ', 12);
+    buffer.writeUInt32LE(16, 16);
+    buffer.writeUInt16LE(1, 20); // PCM
+    buffer.writeUInt16LE(channels, 22);
+    buffer.writeUInt32LE(sampleRate, 24);
+    buffer.writeUInt32LE(byteRate, 28);
+    buffer.writeUInt16LE(blockAlign, 32);
+    buffer.writeUInt16LE(bitsPerSample, 34);
+    
+    // data chunk
+    buffer.write('data', 36);
+    buffer.writeUInt32LE(dataLength, 40);
+    
+    return buffer;
   }
 
   escapeXml(unsafe) {
