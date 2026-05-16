@@ -10,9 +10,10 @@ const log = (msg, data) => {
 
 // Thresholds
 const SILENCE_THRESHOLD_DB = -45;
-const SILENCE_DURATION_MS = 1200;
+const SILENCE_DURATION_MS = 2500;
 const MIN_SPEECH_MS = 400;
 const MAX_TURN_MS = 30000;
+const BARGE_IN_THRESHOLD_DB = -35; // Louder threshold for interrupting
 
 function LiveCallMode({ sessionId }) {
   // UI State
@@ -31,7 +32,8 @@ function LiveCallMode({ sessionId }) {
     lastTranscript: '',
     lastAiReply: '',
     lastError: '',
-    turnCount: 0
+    turnCount: 0,
+    bargeInEnabled: true
   });
 
   // Refs (not triggering re-renders)
@@ -42,6 +44,8 @@ function LiveCallMode({ sessionId }) {
   const mediaRecorderRef = useRef(null);
   const animationFrameRef = useRef(null);
   const durationIntervalRef = useRef(null);
+  const audioPlayerRef = useRef(null); // For barge-in interrupt
+  const isInterruptedRef = useRef(false); // Track if current turn was interrupted
   
   // VAD state refs
   const isSpeakingRef = useRef(false);
@@ -64,7 +68,7 @@ function LiveCallMode({ sessionId }) {
       return;
     }
 
-    log('=== STARTING LIVE CALL ===');
+    log('=== STARTING LIVE CALL WITH BARGE-IN ===');
     setError(null);
     
     try {
@@ -115,7 +119,7 @@ function LiveCallMode({ sessionId }) {
       setStatus('listening');
       updateDebug({ state: 'listening', turnCount: 0 });
       
-      // Start VAD loop
+      // Start VAD loop (runs continuously including during TTS)
       startVADLoop();
 
     } catch (err) {
@@ -125,9 +129,9 @@ function LiveCallMode({ sessionId }) {
     }
   }, [sessionId, updateDebug]);
 
-  // VAD Loop
+  // VAD Loop - runs continuously for barge-in detection
   const startVADLoop = useCallback(() => {
-    log('VAD loop starting');
+    log('VAD loop starting (with barge-in enabled)');
     
     const loop = () => {
       if (!analyserRef.current) return;
@@ -151,92 +155,134 @@ function LiveCallMode({ sessionId }) {
       // Update volume display
       updateDebug({ volumeDb: Math.round(db) });
       
-      // Speech detection
-      const isSpeech = db > SILENCE_THRESHOLD_DB;
-      
-      if (isSpeech) {
-        // SPEECH DETECTED
-        if (!isSpeakingRef.current) {
-          // Speech STARTED
-          isSpeakingRef.current = true;
-          speechStartTimeRef.current = now;
-          silenceStartTimeRef.current = null;
-          turnStartTimeRef.current = now;
-          
-          log('🎤 SPEECH STARTED', { db: db.toFixed(1) });
-          updateDebug({ 
-            state: 'recording',
-            silenceMs: 0,
-            chunkCount: 0 
-          });
-          
-          // Start MediaRecorder
-          startRecording();
-        } else {
-          // Speech CONTINUING - reset silence
-          silenceStartTimeRef.current = null;
-          updateDebug({ silenceMs: 0 });
+      // BARGE-IN DETECTION: Check if user is speaking during TTS playback
+      if (status === 'speaking' && !isSpeakingRef.current) {
+        // Use higher threshold for barge-in (need to speak louder to interrupt)
+        const isBargeIn = db > BARGE_IN_THRESHOLD_DB;
+        
+        if (isBargeIn) {
+          log('🛑 BARGE-IN DETECTED', { db: db.toFixed(1) });
+          handleBargeIn();
+          // Don't return - continue loop
         }
-      } else {
-        // SILENCE DETECTED
-        if (isSpeakingRef.current) {
-          if (!silenceStartTimeRef.current) {
-            silenceStartTimeRef.current = now;
-          }
-          
-          const silenceMs = now - silenceStartTimeRef.current;
-          updateDebug({ silenceMs });
-          
-          // Check if silence duration triggered
-          if (silenceMs > SILENCE_DURATION_MS) {
-            const speechDuration = now - speechStartTimeRef.current;
+      }
+      
+      // NORMAL SPEECH DETECTION (only when listening)
+      if (status === 'listening') {
+        const isSpeech = db > SILENCE_THRESHOLD_DB;
+        
+        if (isSpeech) {
+          // SPEECH DETECTED
+          if (!isSpeakingRef.current) {
+            // Speech STARTED
+            isSpeakingRef.current = true;
+            speechStartTimeRef.current = now;
+            silenceStartTimeRef.current = null;
+            turnStartTimeRef.current = now;
+            isInterruptedRef.current = false;
             
-            if (speechDuration >= MIN_SPEECH_MS) {
-              // VALID SPEECH SEGMENT - PROCESS IT
-              log('⏹️ SILENCE DETECTED - Ending turn', { 
-                speechDuration, 
-                silenceMs 
-              });
+            log('🎤 SPEECH STARTED', { db: db.toFixed(1) });
+            updateDebug({ 
+              state: 'recording',
+              silenceMs: 0,
+              chunkCount: 0 
+            });
+            
+            // Start MediaRecorder
+            startRecording();
+          } else {
+            // Speech CONTINUING - reset silence
+            silenceStartTimeRef.current = null;
+            updateDebug({ silenceMs: 0 });
+          }
+        } else {
+          // SILENCE DETECTED
+          if (isSpeakingRef.current) {
+            if (!silenceStartTimeRef.current) {
+              silenceStartTimeRef.current = now;
+            }
+            
+            const silenceMs = now - silenceStartTimeRef.current;
+            updateDebug({ silenceMs });
+            
+            // Check if silence duration triggered
+            if (silenceMs > SILENCE_DURATION_MS) {
+              const speechDuration = now - speechStartTimeRef.current;
               
-              // Stop VAD loop temporarily
-              if (animationFrameRef.current) {
-                cancelAnimationFrame(animationFrameRef.current);
-                animationFrameRef.current = null;
+              if (speechDuration >= MIN_SPEECH_MS) {
+                // VALID SPEECH SEGMENT - PROCESS IT
+                log('⏹️ SILENCE DETECTED - Ending turn', { 
+                  speechDuration, 
+                  silenceMs 
+                });
+                
+                // Stop VAD loop temporarily
+                if (animationFrameRef.current) {
+                  cancelAnimationFrame(animationFrameRef.current);
+                  animationFrameRef.current = null;
+                }
+                
+                // Process this turn
+                processTurn();
+                return; // Exit loop
+                
+              } else {
+                // TOO SHORT - DISCARD
+                log('⚠️ Speech too short, discarding', { duration: speechDuration });
+                isSpeakingRef.current = false;
+                speechStartTimeRef.current = null;
+                silenceStartTimeRef.current = null;
+                
+                // Stop recording without processing
+                if (mediaRecorderRef.current?.state === 'recording') {
+                  mediaRecorderRef.current.stop();
+                }
+                
+                updateDebug({ 
+                  state: 'listening',
+                  silenceMs: 0,
+                  chunkCount: 0,
+                  lastError: 'Speech too short, try again'
+                });
               }
-              
-              // Process this turn
-              processTurn();
-              return; // Exit loop
-              
-            } else {
-              // TOO SHORT - DISCARD
-              log('⚠️ Speech too short, discarding', { duration: speechDuration });
-              isSpeakingRef.current = false;
-              speechStartTimeRef.current = null;
-              silenceStartTimeRef.current = null;
-              
-              // Stop recording without processing
-              if (mediaRecorderRef.current?.state === 'recording') {
-                mediaRecorderRef.current.stop();
-              }
-              
-              updateDebug({ 
-                state: 'listening',
-                silenceMs: 0,
-                chunkCount: 0,
-                lastError: 'Speech too short, try again'
-              });
             }
           }
         }
       }
       
-      // Continue loop while in listening state
+      // Continue loop (always runs for barge-in detection)
       animationFrameRef.current = requestAnimationFrame(loop);
     };
     
     animationFrameRef.current = requestAnimationFrame(loop);
-  }, [updateDebug]);
+  }, [status, updateDebug]);
+
+  // Handle barge-in (interrupt TTS)
+  const handleBargeIn = () => {
+    log('🔇 INTERRUPTING - Stopping TTS playback');
+    
+    isInterruptedRef.current = true;
+    
+    // Stop audio playback
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.pause();
+      audioPlayerRef.current.currentTime = 0;
+      log('TTS audio stopped');
+    }
+    
+    // Immediately start listening for new speech
+    setStatus('listening');
+    updateDebug({ 
+      state: 'listening',
+      lastError: 'Interrupted - listening...'
+    });
+    
+    // Reset speech detection for new input
+    isSpeakingRef.current = false;
+    speechStartTimeRef.current = null;
+    silenceStartTimeRef.current = null;
+    audioChunksRef.current = [];
+  };
 
   // Start recording
   const startRecording = () => {
@@ -261,12 +307,12 @@ function LiveCallMode({ sessionId }) {
       });
       
       // ON DATA AVAILABLE
-      mediaRecorderRef.current.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
+      mediaRecorderRef.current.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
           updateDebug({ chunkCount: audioChunksRef.current.length });
           log('Chunk received', { 
-            size: event.data.size, 
+            size: e.data.size, 
             totalChunks: audioChunksRef.current.length 
           });
         }
@@ -367,49 +413,56 @@ function LiveCallMode({ sessionId }) {
         sessionId: result.sessionId 
       });
       
-      // 6. PLAY TTS RESPONSE
+      // 6. PLAY TTS RESPONSE (with barge-in support)
       if (result.audioBase64) {
         setStatus('speaking');
         updateDebug({ state: 'speaking' });
         
-        log('Playing TTS audio...');
+        log('Playing TTS audio... (speak louder to interrupt)');
         
         const audioSrc = `data:${result.format || 'audio/mp3'};base64,${result.audioBase64}`;
-        const audio = new Audio(audioSrc);
+        audioPlayerRef.current = new Audio(audioSrc);
         
         await new Promise((resolve, reject) => {
-          audio.onended = () => {
-            log('TTS playback complete');
+          audioPlayerRef.current.onended = () => {
+            if (!isInterruptedRef.current) {
+              log('TTS playback complete (not interrupted)');
+            }
             resolve();
           };
-          audio.onerror = (err) => {
+          audioPlayerRef.current.onerror = (err) => {
             log('TTS playback ERROR', err);
             reject(err);
           };
-          audio.play().catch(reject);
+          audioPlayerRef.current.play().catch(reject);
         });
         
       } else {
         log('No TTS audio received');
       }
       
-      // 7. RESET FOR NEXT TURN
-      log('Resetting for next turn...');
-      
-      isSpeakingRef.current = false;
-      speechStartTimeRef.current = null;
-      silenceStartTimeRef.current = null;
-      audioChunksRef.current = [];
-      
-      setStatus('listening');
-      updateDebug({ 
-        state: 'listening',
-        silenceMs: 0,
-        chunkCount: 0
-      });
-      
-      // Restart VAD loop
-      startVADLoop();
+      // 7. RESET FOR NEXT TURN (only if not already interrupted and barge-in happened)
+      if (status !== 'listening') {
+        log('Resetting for next turn...');
+        
+        isSpeakingRef.current = false;
+        speechStartTimeRef.current = null;
+        silenceStartTimeRef.current = null;
+        audioChunksRef.current = [];
+        isInterruptedRef.current = false;
+        
+        setStatus('listening');
+        updateDebug({ 
+          state: 'listening',
+          silenceMs: 0,
+          chunkCount: 0
+        });
+        
+        // Restart VAD loop (in case it stopped)
+        if (!animationFrameRef.current) {
+          startVADLoop();
+        }
+      }
       
     } catch (err) {
       log('Turn processing FAILED', err.message);
@@ -424,7 +477,9 @@ function LiveCallMode({ sessionId }) {
         isSpeakingRef.current = false;
         setStatus('listening');
         updateDebug({ state: 'listening' });
-        startVADLoop();
+        if (!animationFrameRef.current) {
+          startVADLoop();
+        }
       }, 2000);
     }
   };
@@ -453,6 +508,9 @@ function LiveCallMode({ sessionId }) {
     }
     if (durationIntervalRef.current) {
       clearInterval(durationIntervalRef.current);
+    }
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.pause();
     }
     if (mediaRecorderRef.current?.state === 'recording') {
       mediaRecorderRef.current.stop();
@@ -492,6 +550,7 @@ function LiveCallMode({ sessionId }) {
     // Clear refs
     callIdRef.current = null;
     isSpeakingRef.current = false;
+    isInterruptedRef.current = false;
     audioChunksRef.current = [];
     
   }, [updateDebug]);
@@ -513,7 +572,7 @@ function LiveCallMode({ sessionId }) {
     <div className="live-call-mode">
       <div className="mode-header">
         <h3>📞 Live Call Mode</h3>
-        <p>Continuous conversation. Speak naturally.</p>
+        <p>Continuous conversation with barge-in. Speak louder to interrupt Friday.</p>
       </div>
 
       {/* Error Banner */}
@@ -558,12 +617,12 @@ function LiveCallMode({ sessionId }) {
             <span className="value">{debug.chunkCount}</span>
           </div>
           <div className="debug-row">
-            <span className="label">Last Blob:</span>
-            <span className="value">{debug.lastBlobSize} bytes</span>
-          </div>
-          <div className="debug-row">
             <span className="label">Turns:</span>
             <span className="value">{debug.turnCount}</span>
+          </div>
+          <div className="debug-row">
+            <span className="label">Barge-in:</span>
+            <span className="value" style={{ color: '#44ff44' }}>✓ Enabled</span>
           </div>
           {debug.lastTranscript && (
             <div className="debug-row transcript">
@@ -607,23 +666,25 @@ function LiveCallMode({ sessionId }) {
               <>
                 <div className="status-icon">🎤</div>
                 <p>Listening...</p>
-                <span className="hint">Speak naturally, pause when done</span>
+                <span className="hint">Speak naturally (pause 2.5s when done)</span>
               </>
             )}
             
             {status === 'thinking' && (
               <>
                 <div className="spinner"></div>
-                <p>Processing...</p>
+                <p>Thinking...</p>
                 <span className="hint">STT → AI → TTS</span>
               </>
             )}
             
             {status === 'speaking' && (
               <>
-                <div className="speaking-icon">🔊</div>
+                <div className="speaking-indicator">
+                  <span className="sound-icon">🔊</span>
+                </div>
                 <p>Speaking...</p>
-                <span className="hint">Friday is responding</span>
+                <span className="hint">🎙️ SPEAK LOUDER TO INTERRUPT</span>
               </>
             )}
           </div>

@@ -274,6 +274,12 @@
   color: rgba(255, 255, 255, 0.4);
 }
 
+.status-display.speaking .hint {
+  color: #44ff44;
+  font-weight: 600;
+  animation: pulse 1.5s infinite;
+}
+
 /* Current turn transcript */
 .current-turn {
   margin-top: 30px;
