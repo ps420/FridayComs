@@ -358,25 +358,40 @@ app.post('/api/calls/:id/process', async (req, res) => {
     
     const aiStart = Date.now();
     let aiResult;
+    let usedFallback = false;
     
     try {
       aiResult = await aiProvider.sendMessage(userTranscript, safeHistory);
     } catch (aiErr) {
       console.error(`[Turn] AI call failed: ${aiErr.message}`);
-      throw new Error(`AI error: ${aiErr.message}`);
+      console.log('[Turn] Falling back to mock provider...');
+      
+      // Fallback to mock provider
+      const MockProvider = require('./providers/mock-provider');
+      const mockProvider = new MockProvider();
+      
+      try {
+        aiResult = await mockProvider.sendMessage(userTranscript, safeHistory);
+        usedFallback = true;
+        console.log('[Turn] Mock fallback succeeded');
+      } catch (mockErr) {
+        console.error(`[Turn] Mock fallback also failed: ${mockErr.message}`);
+        throw new Error(`AI error: ${aiErr.message}`);
+      }
     }
     
     const aiLatency = Date.now() - aiStart;
     
     const aiResponse = aiResult.content;
-    console.log(`[Turn] AI Response (${aiLatency}ms): "${aiResponse.slice(0, 100)}${aiResponse.length > 100 ? '...' : ''}"`);
+    const providerName = usedFallback ? 'mock (fallback)' : aiResult.provider;
+    console.log(`[Turn] AI Response (${aiLatency}ms) [${providerName}]: "${aiResponse.slice(0, 100)}${aiResponse.length > 100 ? '...' : ''}"`);
     
     // Save AI message to session
     let aiMessage = null;
     aiMessage = messageService.addMessage(effectiveSessionId, 'assistant', aiResponse, {
-      provider: aiResult.provider,
+      provider: usedFallback ? 'mock-fallback' : aiResult.provider,
       latency: aiLatency,
-      usage: aiResult.usage
+      usage: aiResult.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
     });
     
     // Step 4: Text-to-Speech

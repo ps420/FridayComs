@@ -71,9 +71,15 @@ class AzureOpenAIProvider {
       this.lastError = null;
 
       const assistantMessage = response.data.choices[0]?.message?.content;
+      const finishReason = response.data.choices[0]?.finish_reason;
       
       if (!assistantMessage) {
-        throw new Error('Empty response from Azure OpenAI');
+        console.error('[Azure OpenAI] Empty response details:', {
+          finishReason,
+          choices: response.data.choices,
+          usage: response.data.usage
+        });
+        throw new Error(`Empty response from Azure OpenAI (finish_reason: ${finishReason || 'unknown'})`);
       }
 
       return {
