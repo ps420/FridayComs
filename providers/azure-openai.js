@@ -5,8 +5,8 @@ class AzureOpenAIProvider {
     this.endpoint = process.env.AZURE_OPENAI_ENDPOINT;
     this.apiKey = process.env.AZURE_OPENAI_API_KEY;
     this.deployment = process.env.AZURE_OPENAI_DEPLOYMENT;
-    this.apiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-02-01';
-    this.timeout = 30000; // 30 seconds
+    this.apiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-08-01-preview';
+    this.timeout = 60000; // 60 seconds for streaming
     this.status = 'unknown';
     this.lastError = null;
   }
@@ -28,6 +28,7 @@ class AzureOpenAIProvider {
     };
   }
 
+  // Non-streaming send (for simple responses)
   async sendMessage(message, history = []) {
     if (!this.isConfigured()) {
       throw new Error('Azure OpenAI not configured. Check environment variables.');
@@ -35,27 +36,14 @@ class AzureOpenAIProvider {
 
     const url = `${this.endpoint}/openai/deployments/${this.deployment}/chat/completions?api-version=${this.apiVersion}`;
 
-    // Build messages array from history
     const messages = [
       {
         role: 'system',
         content: 'You are Friday, an AI assistant. Be helpful, concise, and chill. You belong to Zayan.'
-      }
+      },
+      ...history,
+      { role: 'user', content: message }
     ];
-
-    // Add recent history (last 10 messages)
-    if (history && history.length > 0) {
-      history.slice(-10).forEach(msg => {
-        if (msg.type === 'user') {
-          messages.push({ role: 'user', content: msg.content });
-        } else if (msg.type === 'ai' && !msg.isMock) {
-          messages.push({ role: 'assistant', content: msg.content });
-        }
-      });
-    }
-
-    // Add current message
-    messages.push({ role: 'user', content: message });
 
     try {
       console.log(`[Azure OpenAI] Sending request to ${this.deployment}...`);
@@ -63,7 +51,7 @@ class AzureOpenAIProvider {
 
       const response = await axios.post(url, {
         messages: messages,
-        max_tokens: 800,
+        max_tokens: 1500,
         temperature: 0.7,
         top_p: 0.95,
         frequency_penalty: 0,
@@ -110,20 +98,110 @@ class AzureOpenAIProvider {
         const status = error.response.status;
         const errorData = error.response.data?.error;
         
-        if (status === 401) {
-          throw new Error('Authentication failed - check API key');
-        }
-        if (status === 429) {
-          throw new Error('Rate limit exceeded - please wait');
-        }
-        if (status === 404) {
-          throw new Error(`Deployment '${this.deployment}' not found`);
-        }
+        if (status === 401) throw new Error('Authentication failed - check API key');
+        if (status === 429) throw new Error('Rate limit exceeded - please wait');
+        if (status === 404) throw new Error(`Deployment '${this.deployment}' not found`);
         
         throw new Error(`Azure OpenAI error (${status}): ${errorData?.message || error.message}`);
       }
       
       throw new Error(`Azure OpenAI error: ${error.message}`);
+    }
+  }
+
+  // STREAMING support
+  async *streamMessage(message, history = [], onToken = null) {
+    if (!this.isConfigured()) {
+      throw new Error('Azure OpenAI not configured');
+    }
+
+    const url = `${this.endpoint}/openai/deployments/${this.deployment}/chat/completions?api-version=${this.apiVersion}`;
+
+    const messages = [
+      {
+        role: 'system',
+        content: 'You are Friday, an AI assistant. Be helpful, concise, and chill. You belong to Zayan.'
+      },
+      ...history,
+      { role: 'user', content: message }
+    ];
+
+    try {
+      console.log(`[Azure OpenAI] Starting stream to ${this.deployment}...`);
+      const startTime = Date.now();
+
+      const response = await axios.post(url, {
+        messages: messages,
+        max_tokens: 1500,
+        temperature: 0.7,
+        stream: true,
+        stream_options: { include_usage: true }
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'api-key': this.apiKey,
+          'Accept': 'text/event-stream'
+        },
+        responseType: 'stream',
+        timeout: this.timeout
+      });
+
+      let fullContent = '';
+      let usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+
+      for await (const chunk of response.data) {
+        const lines = chunk.toString().split('\n');
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            
+            if (data === '[DONE]') {
+              const latency = Date.now() - startTime;
+              yield {
+                type: 'done',
+                content: fullContent,
+                usage,
+                latency,
+                provider: 'azure-openai'
+              };
+              return;
+            }
+
+            try {
+              const parsed = JSON.parse(data);
+              
+              // Check for usage in final chunk
+              if (parsed.usage) {
+                usage = parsed.usage;
+              }
+              
+              // Extract delta content
+              const delta = parsed.choices?.[0]?.delta?.content;
+              if (delta) {
+                fullContent += delta;
+                yield {
+                  type: 'token',
+                  token: delta,
+                  content: fullContent
+                };
+                
+                if (onToken) {
+                  onToken(delta, fullContent);
+                }
+              }
+            } catch (e) {
+              // Ignore parse errors for incomplete chunks
+            }
+          }
+        }
+      }
+
+    } catch (error) {
+      this.status = 'error';
+      this.lastError = error.message;
+      console.error('[Azure OpenAI Stream] Error:', error.message);
+      throw error;
     }
   }
 }

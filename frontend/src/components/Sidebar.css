@@ -194,25 +194,60 @@
   border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
 
+.new-session-btn,
 .clear-chat-btn {
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
   padding: 12px 18px;
-  background: rgba(255, 68, 68, 0.1);
-  border: 1px solid rgba(255, 68, 68, 0.2);
   border-radius: 12px;
-  color: rgba(255, 100, 100, 0.9);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.3s ease;
+  margin-bottom: 8px;
+}
+
+.new-session-btn {
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.2) 0%, rgba(118, 75, 162, 0.2) 100%);
+  border: 1px solid rgba(102, 126, 234, 0.3);
+  color: rgba(165, 180, 252, 0.9);
+}
+
+.new-session-btn:hover {
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.3) 0%, rgba(118, 75, 162, 0.3) 100%);
+  transform: translateY(-2px);
+}
+
+.clear-chat-btn {
+  background: rgba(255, 68, 68, 0.1);
+  border: 1px solid rgba(255, 68, 68, 0.2);
+  color: rgba(255, 100, 100, 0.9);
 }
 
 .clear-chat-btn:hover {
   background: rgba(255, 68, 68, 0.2);
   transform: translateY(-2px);
+}
+
+.session-info {
+  margin-top: 16px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.session-label {
+  color: rgba(255, 255, 255, 0.4);
+  display: block;
+  margin-bottom: 4px;
+}
+
+.session-value {
+  color: rgba(255, 255, 255, 0.7);
+  font-family: monospace;
 }
 
 .sidebar-footer {

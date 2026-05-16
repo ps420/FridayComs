@@ -1,7 +1,7 @@
 import React from 'react';
 import './Sidebar.css';
 
-function Sidebar({ activeTab, setActiveTab, healthStatus, messageCount, onClearChat }) {
+function Sidebar({ activeTab, setActiveTab, healthStatus, messageCount, onClearChat, onNewSession, sessionId }) {
   const isHealthy = healthStatus?.status === 'ok';
 
   return (
@@ -81,6 +81,18 @@ function Sidebar({ activeTab, setActiveTab, healthStatus, messageCount, onClearC
 
       <div className="sidebar-section">
         <button 
+          className="new-session-btn"
+          onClick={onNewSession}
+          title="Start a new conversation"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <line x1="12" y1="5" x2="12" y2="19"/>
+            <line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          New Session
+        </button>
+        
+        <button 
           className="clear-chat-btn"
           onClick={onClearChat}
         >
@@ -90,6 +102,15 @@ function Sidebar({ activeTab, setActiveTab, healthStatus, messageCount, onClearC
           </svg>
           Clear Chat
         </button>
+
+        {sessionId && (
+          <div className="session-info">
+            <span className="session-label">Session:</span>
+            <span className="session-value" title={sessionId}>
+              {sessionId.slice(0, 8)}...
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="sidebar-footer">

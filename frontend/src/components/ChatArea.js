@@ -1,8 +1,9 @@
 import React from 'react';
 import './ChatArea.css';
 
-function ChatArea({ messages, isTyping, aiProvider }) {
+function ChatArea({ messages, isTyping, streamingContent, aiProvider, sessionId }) {
   const formatTime = (timestamp) => {
+    if (!timestamp) return '';
     const date = new Date(timestamp);
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
@@ -13,63 +14,114 @@ function ChatArea({ messages, isTyping, aiProvider }) {
     <div className="chat-area">
       <div className="chat-header">
         <div className="chat-info">
-          <h2>Zayan</h2>
-          <span className="status">Active</span>
+          <h2>Friday</h2>
+          {sessionId && (
+            <span className="session-id" title={sessionId}>
+              Session: {sessionId.slice(0, 8)}...
+            </span>
+          )}
         </div>
-        <div className={`provider-badge ${isAzureMode ? 'azure' : 'mock'}`} title={isAzureMode ? 'Azure OpenAI connected' : 'AI in mock mode'}>
-          {isAzureMode ? '✓ Azure OpenAI' : '⚠️ MOCK MODE'}
+        <div className="header-badges">
+          <div className={`provider-badge ${isAzureMode ? 'azure' : 'mock'}`}>
+            {isAzureMode ? '⚡ Streaming' : '⚠️ Mock'}
+          </div>
+          {streamingContent && (
+            <div className="streaming-indicator">
+              <span className="pulse"></span>
+              Typing...
+            </div>
+          )}
         </div>
       </div>
       
       <div className="messages-container">
-        {messages.length === 0 ? (
+        {messages.length === 0 && !streamingContent ? (
           <div className="welcome-message">
             <h1>Welcome to FridayComs</h1>
-            <p>Your AI companion interface.</p>
-            <div className="status-box">
-              <h3>System Status:</h3>
-              <ul>
-                <li className="status-real">✓ Backend: Real & Connected</li>
-                <li className="status-real">✓ WebSocket: Real-time Chat Active</li>
-                <li className={isAzureMode ? 'status-real' : 'status-mock'}>
-                  {isAzureMode ? '✓ AI: Azure OpenAI (Live)' : '⚠ AI: MOCK (Fallback)'}
-                </li>
-                <li className="status-placeholder">📦 Voice: Placeholder (UI only)</li>
-                <li className="status-off">❌ OpenClaw: Backend only</li>
-              </ul>
+            <p className="subtitle">Persistent AI conversations with streaming</p>
+            
+            <div className="features-grid">
+              <div className="feature-item">
+                <span className="feature-icon">💾</span>
+                <span>Sessions persist after refresh</span>
+              </div>
+              <div className="feature-item">
+                <span className="feature-icon">⚡</span>
+                <span>Real-time streaming responses</span>
+              </div>
+              <div className="feature-item">
+                <span className="feature-icon">📊</span>
+                <span>Token usage tracking</span>
+              </div>
+              <div className="feature-item">
+                <span className="feature-icon">🔄</span>
+                <span>Auto-reconnect on disconnect</span>
+              </div>
             </div>
-            <p style={{ marginTop: '20px', fontSize: '12px', opacity: 0.5 }}>
+
+            <div className={`status-badge ${isAzureMode ? 'azure' : 'mock'}`}>
               {isAzureMode 
-                ? 'Azure OpenAI is active! Type a message to chat with Friday.'
-                : 'Azure OpenAI not configured. Check Settings → Azure Status.'}
+                ? '✓ Azure OpenAI Connected with Streaming'
+                : '⚠ Running in Mock Mode'}
+            </div>
+
+            <p className="hint">
+              Type a message to start a persistent conversation
             </p>
           </div>
         ) : (
           <>
-            {messages.map((msg) => (
+            {messages.map((msg, index) => (
               <div 
-                key={msg.id} 
-                className={`message ${msg.type} ${msg.isMock ? 'mock' : ''}`}
+                key={msg.id || index} 
+                className={`message ${msg.role} ${msg.provider === 'mock' ? 'mock' : ''}`}
               >
-                {msg.isVoice && <span style={{ marginRight: '8px' }}>🎤</span>}
-                {msg.content}
-                {msg.note && (
-                  <div className="message-note">{msg.note}</div>
-                )}
-                {msg.latency && (
-                  <div className="message-meta">
-                    <span className="provider-tag">
-                      {msg.provider === 'azure-openai' ? 'Azure' : 'Mock'} • {msg.latency}ms
+                <div className="message-header">
+                  <span className="message-role">
+                    {msg.role === 'user' ? 'You' : 'Friday'}
+                  </span>
+                  {msg.latency && (
+                    <span className="message-meta">
+                      {msg.provider === 'azure-openai' && <span className="azure-dot">●</span>}
+                      {msg.latency}ms • {msg.usage?.total_tokens || 0} tokens
                     </span>
-                  </div>
-                )}
-                <div className="message-timestamp">
-                  {formatTime(msg.timestamp)}
+                  )}
+                </div>
+                
+                <div className="message-content">
+                  {msg.content}
+                </div>
+                
+                <div className="message-footer">
+                  <span className="message-time">
+                    {formatTime(msg.createdAt)}
+                  </span>
+                  {msg.provider === 'mock' && (
+                    <span className="mock-label">MOCK</span>
+                  )}
                 </div>
               </div>
             ))}
             
-            {isTyping && (
+            {/* Streaming message */}
+            {streamingContent && (
+              <div className="message assistant streaming">
+                <div className="message-header">
+                  <span className="message-role">Friday</span>
+                  <span className="streaming-indicator-inline">
+                    <span className="pulse"></span>
+                    Streaming...
+                  </span>
+                </div>
+                <div className="message-content">
+                  {streamingContent}
+                  <span className="cursor">|</span>
+                </div>
+              </div>
+            )}
+            
+            {/* Typing indicator for non-streaming */}
+            {isTyping && !streamingContent && (
               <div className="typing-indicator">
                 <div className="typing-dot"></div>
                 <div className="typing-dot"></div>
