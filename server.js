@@ -11,6 +11,7 @@ const MessageService = require('./backend/services/messageService');
 const StreamingService = require('./backend/services/streamingService');
 const ConversationMemory = require('./backend/memory/conversationMemory');
 const { getDatabase, closeDatabase } = require('./backend/db/database');
+const AIProviderManager = require('./providers');
 
 const app = express();
 const server = http.createServer(app);
@@ -18,6 +19,7 @@ const wss = new WebSocket.Server({ server });
 
 // Initialize services
 const sessionService = new SessionService();
+const aiProvider = new AIProviderManager();
 const messageService = new MessageService();
 const streamingService = new StreamingService();
 const memory = new ConversationMemory();
@@ -186,9 +188,7 @@ app.post('/api/calls/:id/process', async (req, res) => {
   
   try {
     const { getSpeechService } = require('./backend/services/speechService');
-    const { getProviderManager } = require('./providers');
     const speechService = getSpeechService();
-    const aiProvider = getProviderManager();
     
     if (!speechService.isEnabled()) {
       console.log('[Turn] ERROR: Speech service not configured');
