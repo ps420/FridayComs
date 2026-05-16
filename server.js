@@ -1,12 +1,12 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const app = express();
 
-// Password protection
 const AUTH_PASSWORD = process.env.PASSWORD || 'Friday123';
 
+// Security middleware
 app.use((req, res, next) => {
-  // Skip auth for health check
   if (req.path === '/api/health') return next();
   
   const auth = req.headers.authorization;
@@ -29,13 +29,25 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Serve static frontend
-app.use(express.static(path.join(__dirname, 'frontend/build')));
+// Find and serve static frontend
+let buildPath = path.join(__dirname, 'frontend/build');
+if (!fs.existsSync(buildPath)) {
+  buildPath = path.join(__dirname, 'build');
+}
 
-// SPA fallback
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'frontend/build', 'index.html'));
-});
+console.log('Serving static files from:', buildPath);
+
+if (fs.existsSync(buildPath)) {
+  app.use(express.static(buildPath));
+  
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(buildPath, 'index.html'));
+  });
+} else {
+  app.get('*', (req, res) => {
+    res.send('Build not found. Please check deployment.');
+  });
+}
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {

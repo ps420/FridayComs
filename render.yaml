@@ -2,7 +2,13 @@ services:
   - type: web
     name: fridaycoms
     runtime: node
-    buildCommand: "npm install && cd frontend && npm install && npm run build"
+    plan: free
+    buildCommand: |
+      npm install
+      cd frontend
+      npm install
+      npm run build
+      cp -r build ../build
     startCommand: "node server.js"
     envVars:
       - key: PASSWORD
