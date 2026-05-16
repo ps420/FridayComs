@@ -1,21 +1,26 @@
+require('dotenv').config();
+
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
-const { spawn } = require('child_process');
+const AIProviderManager = require('./providers');
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
+// Initialize AI provider manager
+const aiProvider = new AIProviderManager();
+
 const AUTH_PASSWORD = process.env.PASSWORD || 'Friday123';
 const PORT = process.env.PORT || 3456;
 
-// Service status tracking
-const serviceStatus = {
+// Service status tracking - will be updated dynamically
+let serviceStatus = {
   backend: 'connected',
   websocket: 'connected',
-  ai: 'mock',
+  ai: 'unknown',
   voice: 'placeholder',
   openclaw: 'disconnected'
 };
@@ -29,7 +34,7 @@ app.use(express.static(path.join(__dirname, 'frontend/build')));
 
 // Auth middleware
 const checkAuth = (req, res, next) => {
-  if (req.path === '/api/health') return next();
+  if (req.path === '/api/health' || req.path === '/api/provider/status') return next();
   
   const auth = req.headers.authorization;
   if (!auth) {
@@ -48,8 +53,28 @@ const checkAuth = (req, res, next) => {
 
 app.use(checkAuth);
 
+// Update AI status based on provider
+function updateAIStatus() {
+  const providerStatus = aiProvider.getStatus();
+  const currentProvider = providerStatus.currentProvider;
+  
+  if (currentProvider === 'azure-openai') {
+    const azureStatus = providerStatus.azure.status;
+    if (azureStatus === 'connected' || azureStatus === 'ready') {
+      serviceStatus.ai = 'connected';
+    } else {
+      serviceStatus.ai = 'error';
+    }
+  } else {
+    serviceStatus.ai = 'mock';
+  }
+}
+
 // Health check - shows real vs mock status
 app.get('/api/health', (req, res) => {
+  updateAIStatus();
+  const aiProviderStatus = aiProvider.getStatus();
+  
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
@@ -57,6 +82,7 @@ app.get('/api/health', (req, res) => {
     version: '1.0.0',
     connections: activeConnections.size,
     messages: chatHistory.length,
+    aiProvider: aiProviderStatus.currentProvider,
     features: {
       backend: {
         status: serviceStatus.backend,
@@ -71,7 +97,9 @@ app.get('/api/health', (req, res) => {
       ai: {
         status: serviceStatus.ai,
         label: 'Friday AI',
-        note: '⚠ MOCK - Simulated responses only'
+        note: serviceStatus.ai === 'connected' 
+          ? '✓ Azure OpenAI - Live responses'
+          : '⚠ MOCK - Simulated responses (fallback)'
       },
       voice: {
         status: serviceStatus.voice,
@@ -81,10 +109,21 @@ app.get('/api/health', (req, res) => {
       openclaw: {
         status: serviceStatus.openclaw,
         label: 'OpenClaw Integration',
-        note: '❌ NOT CONNECTED - Next implementation'
+        note: '❌ NOT CONNECTED - Via backend only'
       }
+    },
+    provider: {
+      mode: aiProviderStatus.mode,
+      current: aiProviderStatus.currentProvider,
+      azureConfigured: aiProviderStatus.azure.configured,
+      azureStatus: aiProviderStatus.azure.status
     }
   });
+});
+
+// Provider status endpoint
+app.get('/api/provider/status', (req, res) => {
+  res.json(aiProvider.getStatus());
 });
 
 // Get chat history
@@ -105,11 +144,15 @@ wss.on('connection', (ws) => {
   activeConnections.add(ws);
   serviceStatus.websocket = 'connected';
   
-  // Send welcome with clear mock disclaimer
+  // Determine welcome message based on AI status
+  updateAIStatus();
+  const isAzure = serviceStatus.ai === 'connected';
+  
   ws.send(JSON.stringify({
     type: 'system',
     content: 'Connected to FridayComs',
-    mockWarning: '⚠️ AI responses are MOCK/SIMULATED for UI testing only.',
+    mockWarning: isAzure ? null : '⚠️ AI running in MOCK MODE (fallback)',
+    provider: aiProvider.getStatus().currentProvider,
     timestamp: Date.now()
   }));
   
@@ -128,19 +171,39 @@ wss.on('connection', (ws) => {
         chatHistory.push(userMsg);
         broadcast({ type: 'message', data: userMsg });
         
-        // MOCK AI response - clearly labeled
-        setTimeout(() => {
-          const mockMsg = {
+        // Get AI response through provider manager
+        try {
+          const aiResponse = await aiProvider.sendMessage(data.content, chatHistory);
+          
+          const aiMsg = {
+            id: Date.now() + 1,
+            type: 'ai',
+            isMock: aiResponse.provider === 'mock',
+            provider: aiResponse.provider,
+            latency: aiResponse.latency,
+            content: aiResponse.content,
+            timestamp: Date.now()
+          };
+          
+          chatHistory.push(aiMsg);
+          broadcast({ type: 'message', data: aiMsg });
+          
+        } catch (error) {
+          console.error('AI Provider error:', error.message);
+          
+          // Fallback to mock on Azure error
+          const errorMsg = {
             id: Date.now() + 1,
             type: 'ai',
             isMock: true,
-            content: `[🤖 MOCK AI] ${getMockResponse(data.content)}`,
-            note: 'This is a simulated response for UI testing. Real Friday AI not connected yet.',
+            isError: true,
+            content: `[⚠️ Azure Error - Fallback to Mock] ${error.message}. Using mock response for now.`,
             timestamp: Date.now()
           };
-          chatHistory.push(mockMsg);
-          broadcast({ type: 'message', data: mockMsg });
-        }, 500 + Math.random() * 1000);
+          
+          chatHistory.push(errorMsg);
+          broadcast({ type: 'message', data: errorMsg });
+        }
       }
       
       if (data.type === 'voice') {
@@ -155,17 +218,31 @@ wss.on('connection', (ws) => {
         chatHistory.push(voiceMsg);
         broadcast({ type: 'message', data: voiceMsg });
         
-        setTimeout(() => {
-          const mockMsg = {
+        try {
+          const aiResponse = await aiProvider.sendMessage('User sent a voice message (placeholder)', chatHistory);
+          
+          const aiMsg = {
+            id: Date.now() + 1,
+            type: 'ai',
+            isMock: aiResponse.provider === 'mock',
+            provider: aiResponse.provider,
+            content: `[${aiResponse.provider === 'mock' ? '🤖 MOCK' : '🤖 Friday'}] I received your voice placeholder! Real voice processing not yet connected.`,
+            timestamp: Date.now()
+          };
+          
+          chatHistory.push(aiMsg);
+          broadcast({ type: 'message', data: aiMsg });
+        } catch (error) {
+          const fallbackMsg = {
             id: Date.now() + 1,
             type: 'ai',
             isMock: true,
             content: '[🤖 MOCK AI] Voice placeholder acknowledged. Real voice processing not connected.',
             timestamp: Date.now()
           };
-          chatHistory.push(mockMsg);
-          broadcast({ type: 'message', data: mockMsg });
-        }, 1000);
+          chatHistory.push(fallbackMsg);
+          broadcast({ type: 'message', data: fallbackMsg });
+        }
       }
       
     } catch (err) {
@@ -192,50 +269,32 @@ function broadcast(data) {
   });
 }
 
-// MOCK responses - clearly for UI testing only
-function getMockResponse(message) {
-  const lowerMsg = message.toLowerCase();
-  
-  if (lowerMsg.includes('hello') || lowerMsg.includes('hi')) {
-    return "[MOCK] Hey! This is a simulated greeting. Real Friday AI coming soon.";
-  }
-  if (lowerMsg.includes('help')) {
-    return "[MOCK] Help command simulated. Features: Backend ✓ | WebSocket ✓ | AI (this is mock) | Voice (placeholder) | OpenClaw ❌";
-  }
-  if (lowerMsg.includes('status')) {
-    return "[MOCK] System status - Backend: connected | AI: MOCK MODE | OpenClaw: not connected";
-  }
-  if (lowerMsg.includes('friday')) {
-    return "[MOCK] You called? I'm Friday in placeholder mode. Real intelligence via OpenClaw coming next.";
-  }
-  if (lowerMsg.includes('mock') || lowerMsg.includes('fake')) {
-    return "[MOCK] Yes, I'm currently a mock! Backend and WebSocket are real. AI is simulated for UI testing.";
-  }
-  
-  const responses = [
-    "[MOCK] This is a simulated response for UI testing.",
-    "[MOCK] Real Friday AI not connected yet - backend is live though!",
-    "[MOCK] UI test message - OpenClaw integration coming next.",
-    "[MOCK] Chat system working! Ready for real AI connection.",
-    "[MOCK] FridayComs backend ✓ | WebSocket ✓ | AI (mock only)"
-  ];
-  
-  return responses[Math.floor(Math.random() * responses.length)];
-}
-
 // SPA fallback
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'frontend/build', 'index.html'));
 });
 
 server.listen(PORT, () => {
-  console.log('🚀 FridayComs Enhanced');
+  updateAIStatus();
+  const providerStatus = aiProvider.getStatus();
+  
+  console.log('🚀 FridayComs with Azure OpenAI');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('✓ Backend: Real (Express)');
   console.log('✓ WebSocket: Real (ws)');
-  console.log('⚠ AI: MOCK/Simulated (UI testing)');
+  console.log(`● AI Provider: ${providerStatus.currentProvider}`);
+  if (providerStatus.currentProvider === 'azure-openai') {
+    console.log(`  - Endpoint: ${providerStatus.azure.endpoint || 'Configured'}`);
+    console.log(`  - Status: ${providerStatus.azure.status}`);
+  } else {
+    console.log('  - Azure OpenAI: Not configured (using mock fallback)');
+  }
   console.log('📦 Voice: Placeholder (UI only)');
-  console.log('❌ OpenClaw: Not connected (next step)');
+  console.log('❌ OpenClaw: Backend integrated, frontend via API');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log(`Port: ${PORT}`);
+  console.log(`\nRequired env vars for Azure:`);
+  console.log('  AZURE_OPENAI_ENDPOINT');
+  console.log('  AZURE_OPENAI_API_KEY');
+  console.log('  AZURE_OPENAI_DEPLOYMENT');
 });

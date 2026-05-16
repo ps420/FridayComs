@@ -262,3 +262,43 @@
   color: rgba(255, 255, 255, 0.5);
   line-height: 1.4;
 }
+
+.azure-config {
+  background: rgba(0, 120, 212, 0.1);
+  border: 1px solid rgba(0, 120, 212, 0.3);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.config-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.config-item:last-child {
+  border-bottom: none;
+}
+
+.config-label {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.config-value {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.8);
+  font-weight: 500;
+}
+
+.config-value.azure-active {
+  color: #44ff44;
+}
+
+.config-value.endpoint {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
