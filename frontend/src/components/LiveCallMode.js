@@ -1,49 +1,88 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './LiveCallMode.css';
 
+// Debug logger
 const log = (msg, data) => {
-  console.log(`[LiveCall ${new Date().toLocaleTimeString()}] ${msg}`, data || '');
+  const line = `[LiveCall ${new Date().toLocaleTimeString()}] ${msg}`;
+  console.log(line, data || '');
+  return line;
 };
 
-// Silence detection threshold (in dB)
-const SILENCE_THRESHOLD = -50;
-const SILENCE_DURATION_MS = 1500; // 1.5 seconds of silence = end of speech
-const MIN_SPEECH_DURATION_MS = 500; // Min 500ms of speech before processing
+// Thresholds
+const SILENCE_THRESHOLD_DB = -45;
+const SILENCE_DURATION_MS = 1200;
+const MIN_SPEECH_MS = 400;
+const MAX_TURN_MS = 30000;
 
 function LiveCallMode({ sessionId }) {
-  const [status, setStatus] = useState('idle'); // idle, listening, thinking, speaking
+  // UI State
+  const [status, setStatus] = useState('idle');
   const [error, setError] = useState(null);
-  const [transcript, setTranscript] = useState('');
-  const [aiResponse, setAiResponse] = useState('');
   const [callDuration, setCallDuration] = useState(0);
-  const [callId, setCallId] = useState(null);
-  const [audioLevel, setAudioLevel] = useState(0);
-  const [lastActivity, setLastActivity] = useState(null);
   
-  // Refs
-  const wsRef = useRef(null);
+  // Debug State (visible to user)
+  const [debug, setDebug] = useState({
+    micPermission: 'unknown',
+    state: 'idle',
+    chunkCount: 0,
+    volumeDb: -100,
+    silenceMs: 0,
+    lastBlobSize: 0,
+    lastTranscript: '',
+    lastAiReply: '',
+    lastError: '',
+    turnCount: 0
+  });
+
+  // Refs (not triggering re-renders)
+  const callIdRef = useRef(null);
+  const mediaStreamRef = useRef(null);
   const audioContextRef = useRef(null);
   const analyserRef = useRef(null);
-  const mediaStreamRef = useRef(null);
-  const animationFrameRef = useRef(null);
-  const silenceStartRef = useRef(null);
-  const speechStartRef = useRef(null);
-  const isSpeakingRef = useRef(false);
-  const audioChunksRef = useRef([]);
   const mediaRecorderRef = useRef(null);
-  const callStartTimeRef = useRef(null);
+  const animationFrameRef = useRef(null);
   const durationIntervalRef = useRef(null);
+  
+  // VAD state refs
+  const isSpeakingRef = useRef(false);
+  const speechStartTimeRef = useRef(null);
+  const silenceStartTimeRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const turnStartTimeRef = useRef(null);
+  const lastTranscriptRef = useRef('');
+  const lastAiReplyRef = useRef('');
 
-  // Start the live call
+  // Update debug helper
+  const updateDebug = useCallback((updates) => {
+    setDebug(prev => ({ ...prev, ...updates }));
+  }, []);
+
+  // Start call
   const startCall = useCallback(async () => {
     if (!sessionId) {
-      setError('No session active. Start a chat first.');
+      setError('No session active. Start a chat session first.');
       return;
     }
 
+    log('=== STARTING LIVE CALL ===');
+    setError(null);
+    
     try {
-      setError(null);
-      log('Starting live call...');
+      updateDebug({ micPermission: 'requesting' });
+      
+      // Get microphone
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 16000
+        }
+      });
+      
+      mediaStreamRef.current = stream;
+      updateDebug({ micPermission: 'granted' });
+      log('Microphone permission granted');
 
       // Create call on backend
       const res = await fetch('/api/calls', {
@@ -52,164 +91,243 @@ function LiveCallMode({ sessionId }) {
         body: JSON.stringify({ sessionId, callType: 'voice' })
       });
       const call = await res.json();
-      setCallId(call.id);
-      
-      await fetch(`/api/calls/${call.id}/start`, { method: 'POST' });
-      
-      callStartTimeRef.current = Date.now();
-      setStatus('listening');
+      callIdRef.current = call.id;
+      log('Call created', { callId: call.id });
 
       // Start duration timer
+      const startTime = Date.now();
       durationIntervalRef.current = setInterval(() => {
-        setCallDuration(Math.floor((Date.now() - callStartTimeRef.current) / 1000));
+        setCallDuration(Math.floor((Date.now() - startTime) / 1000));
       }, 1000);
 
-      // Get microphone
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
+      // Setup audio context for VAD
+      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({
+        sampleRate: 16000
       });
-      mediaStreamRef.current = stream;
-
-      // Set up audio analysis for VAD
-      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      
       const source = audioContextRef.current.createMediaStreamSource(stream);
       analyserRef.current = audioContextRef.current.createAnalyser();
       analyserRef.current.fftSize = 2048;
-      analyserRef.current.smoothingTimeConstant = 0.8;
+      analyserRef.current.smoothingTimeConstant = 0.5;
       source.connect(analyserRef.current);
 
-      // Start listening loop
-      listenForSpeech();
+      // Enter listening state
+      setStatus('listening');
+      updateDebug({ state: 'listening', turnCount: 0 });
+      
+      // Start VAD loop
+      startVADLoop();
 
     } catch (err) {
-      log('Start call failed', err.message);
-      setError(err.message);
+      log('Start call FAILED', err.message);
+      updateDebug({ micPermission: 'denied', lastError: err.message });
+      setError(`Microphone access failed: ${err.message}`);
     }
-  }, [sessionId]);
+  }, [sessionId, updateDebug]);
 
-  // Voice Activity Detection loop
-  const listenForSpeech = useCallback(() => {
-    if (!analyserRef.current || status === 'thinking' || status === 'speaking') {
-      return;
-    }
-
-    const analyser = analyserRef.current;
-    const bufferLength = analyser.fftSize;
-    const dataArray = new Float32Array(bufferLength);
+  // VAD Loop
+  const startVADLoop = useCallback(() => {
+    log('VAD loop starting');
     
-    analyser.getFloatTimeDomainData(dataArray);
-    
-    // Calculate RMS (volume)
-    let sum = 0;
-    for (let i = 0; i < bufferLength; i++) {
-      sum += dataArray[i] * dataArray[i];
-    }
-    const rms = Math.sqrt(sum / bufferLength);
-    const db = 20 * Math.log10(rms);
-    
-    // Normalize for display
-    const normalizedLevel = Math.max(0, Math.min(1, (db + 60) / 60));
-    setAudioLevel(normalizedLevel);
-
-    const now = Date.now();
-
-    // Speech detected
-    if (db > SILENCE_THRESHOLD) {
-      if (!isSpeakingRef.current) {
-        // Speech started
-        isSpeakingRef.current = true;
-        speechStartRef.current = now;
-        silenceStartRef.current = null;
-        log('Speech detected', { db: db.toFixed(1) });
-        
-        // Start recording
-        startRecordingChunk();
-      } else {
-        // Continue speaking
-        silenceStartRef.current = null;
+    const loop = () => {
+      if (!analyserRef.current) return;
+      
+      const analyser = analyserRef.current;
+      const bufferLength = analyser.fftSize;
+      const dataArray = new Float32Array(bufferLength);
+      
+      analyser.getFloatTimeDomainData(dataArray);
+      
+      // Calculate RMS and dB
+      let sum = 0;
+      for (let i = 0; i < bufferLength; i++) {
+        sum += dataArray[i] * dataArray[i];
       }
-    } else {
-      // Silence detected
-      if (isSpeakingRef.current) {
-        if (!silenceStartRef.current) {
-          silenceStartRef.current = now;
-        } else if (now - silenceStartRef.current > SILENCE_DURATION_MS) {
-          // Silence for long enough - end of speech
-          const speechDuration = now - speechStartRef.current;
+      const rms = Math.sqrt(sum / bufferLength);
+      const db = rms > 0 ? 20 * Math.log10(rms) : -100;
+      
+      const now = Date.now();
+      
+      // Update volume display
+      updateDebug({ volumeDb: Math.round(db) });
+      
+      // Speech detection
+      const isSpeech = db > SILENCE_THRESHOLD_DB;
+      
+      if (isSpeech) {
+        // SPEECH DETECTED
+        if (!isSpeakingRef.current) {
+          // Speech STARTED
+          isSpeakingRef.current = true;
+          speechStartTimeRef.current = now;
+          silenceStartTimeRef.current = null;
+          turnStartTimeRef.current = now;
           
-          if (speechDuration >= MIN_SPEECH_DURATION_MS) {
-            log('End of speech detected', { duration: speechDuration });
-            stopRecordingAndProcess();
-            return; // Stop the loop
-          } else {
-            // Too short, discard
-            log('Speech too short, discarding', { duration: speechDuration });
-            isSpeakingRef.current = false;
-            speechStartRef.current = null;
-            silenceStartRef.current = null;
+          log('🎤 SPEECH STARTED', { db: db.toFixed(1) });
+          updateDebug({ 
+            state: 'recording',
+            silenceMs: 0,
+            chunkCount: 0 
+          });
+          
+          // Start MediaRecorder
+          startRecording();
+        } else {
+          // Speech CONTINUING - reset silence
+          silenceStartTimeRef.current = null;
+          updateDebug({ silenceMs: 0 });
+        }
+      } else {
+        // SILENCE DETECTED
+        if (isSpeakingRef.current) {
+          if (!silenceStartTimeRef.current) {
+            silenceStartTimeRef.current = now;
+          }
+          
+          const silenceMs = now - silenceStartTimeRef.current;
+          updateDebug({ silenceMs });
+          
+          // Check if silence duration triggered
+          if (silenceMs > SILENCE_DURATION_MS) {
+            const speechDuration = now - speechStartTimeRef.current;
+            
+            if (speechDuration >= MIN_SPEECH_MS) {
+              // VALID SPEECH SEGMENT - PROCESS IT
+              log('⏹️ SILENCE DETECTED - Ending turn', { 
+                speechDuration, 
+                silenceMs 
+              });
+              
+              // Stop VAD loop temporarily
+              if (animationFrameRef.current) {
+                cancelAnimationFrame(animationFrameRef.current);
+                animationFrameRef.current = null;
+              }
+              
+              // Process this turn
+              processTurn();
+              return; // Exit loop
+              
+            } else {
+              // TOO SHORT - DISCARD
+              log('⚠️ Speech too short, discarding', { duration: speechDuration });
+              isSpeakingRef.current = false;
+              speechStartTimeRef.current = null;
+              silenceStartTimeRef.current = null;
+              
+              // Stop recording without processing
+              if (mediaRecorderRef.current?.state === 'recording') {
+                mediaRecorderRef.current.stop();
+              }
+              
+              updateDebug({ 
+                state: 'listening',
+                silenceMs: 0,
+                chunkCount: 0,
+                lastError: 'Speech too short, try again'
+              });
+            }
           }
         }
       }
-    }
-
-    // Continue loop
-    animationFrameRef.current = requestAnimationFrame(listenForSpeech);
-  }, [status]);
-
-  // Start recording a chunk
-  const startRecordingChunk = () => {
-    if (!mediaStreamRef.current) return;
-    
-    audioChunksRef.current = [];
-    
-    // Try to use supported format
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-      ? 'audio/webm;codecs=opus'
-      : 'audio/webm';
-    
-    mediaRecorderRef.current = new MediaRecorder(mediaStreamRef.current, { mimeType });
-    
-    mediaRecorderRef.current.ondataavailable = (e) => {
-      if (e.data.size > 0) {
-        audioChunksRef.current.push(e.data);
-      }
+      
+      // Continue loop while in listening state
+      animationFrameRef.current = requestAnimationFrame(loop);
     };
     
-    mediaRecorderRef.current.start(100);
-    log('Recording chunk started');
-  };
+    animationFrameRef.current = requestAnimationFrame(loop);
+  }, [updateDebug]);
 
-  // Stop recording and process
-  const stopRecordingAndProcess = async () => {
-    if (!mediaRecorderRef.current || mediaRecorderRef.current.state !== 'recording') {
-      return;
-    }
-
-    setStatus('thinking');
-    mediaRecorderRef.current.stop();
-
-    // Wait for final data
-    await new Promise(resolve => {
-      mediaRecorderRef.current.onstop = resolve;
-    });
-
+  // Start recording
+  const startRecording = () => {
+    if (!mediaStreamRef.current) return;
+    
+    // Reset chunks
+    audioChunksRef.current = [];
+    
+    // Detect best MIME type
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : MediaRecorder.isTypeSupported('audio/webm')
+      ? 'audio/webm'
+      : 'audio/ogg';
+    
+    log('Starting MediaRecorder', { mimeType });
+    
     try {
-      const blob = new Blob(audioChunksRef.current, { 
-        type: mediaRecorderRef.current.mimeType 
+      mediaRecorderRef.current = new MediaRecorder(mediaStreamRef.current, { 
+        mimeType,
+        audioBitsPerSecond: 16000 
       });
       
-      log('Chunk recorded', { size: blob.size });
+      // ON DATA AVAILABLE
+      mediaRecorderRef.current.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+          updateDebug({ chunkCount: audioChunksRef.current.length });
+          log('Chunk received', { 
+            size: event.data.size, 
+            totalChunks: audioChunksRef.current.length 
+          });
+        }
+      };
+      
+      // ON ERROR
+      mediaRecorderRef.current.onerror = (err) => {
+        log('MediaRecorder ERROR', err.message);
+        updateDebug({ lastError: `Recorder: ${err.message}` });
+      };
+      
+      // Start with 100ms timeslice to collect data regularly
+      mediaRecorderRef.current.start(100);
+      
+    } catch (err) {
+      log('MediaRecorder start FAILED', err.message);
+      updateDebug({ lastError: err.message });
+    }
+  };
 
-      // Convert to base64
+  // Process one turn (Speech -> STT -> AI -> TTS -> Play)
+  const processTurn = async () => {
+    setStatus('thinking');
+    updateDebug({ state: 'processing' });
+    
+    const turnNum = debug.turnCount + 1;
+    log(`=== PROCESSING TURN #${turnNum} ===`);
+    
+    try {
+      // 1. STOP RECORDING
+      log('Stopping recorder...');
+      
+      if (mediaRecorderRef.current?.state === 'recording') {
+        // Get final data
+        await new Promise((resolve) => {
+          mediaRecorderRef.current.onstop = resolve;
+          mediaRecorderRef.current.stop();
+        });
+      }
+      
+      // 2. CREATE BLOB
+      const blob = new Blob(audioChunksRef.current, { 
+        type: mediaRecorderRef.current?.mimeType || 'audio/webm' 
+      });
+      
+      updateDebug({ lastBlobSize: blob.size });
+      log('Blob created', { size: blob.size, type: blob.type });
+      
+      // Validate blob
+      if (blob.size < 100) {
+        throw new Error(`Audio too small: ${blob.size} bytes`);
+      }
+      
+      // 3. CONVERT TO BASE64
+      log('Converting to base64...');
       const base64 = await blobToBase64(blob);
-
-      // Send to backend
-      log('Sending to backend...');
-      const response = await fetch(`/api/calls/${callId}/process`, {
+      log('Base64 ready', { length: base64.length });
+      
+      // 4. SEND TO BACKEND
+      log('Sending to /api/calls/process...');
+      const response = await fetch(`/api/calls/${callIdRef.current}/process`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -218,60 +336,98 @@ function LiveCallMode({ sessionId }) {
           mimeType: blob.type
         })
       });
-
+      
       const result = await response.json();
-
-      if (result.error) {
-        throw new Error(result.error);
+      
+      if (!response.ok || result.error) {
+        throw new Error(result.error || result.message || 'Backend error');
       }
-
+      
+      // 5. UPDATE STATE WITH RESULTS
+      lastTranscriptRef.current = result.transcript || '';
+      lastAiReplyRef.current = result.aiResponse || '';
+      
+      updateDebug({
+        lastTranscript: result.transcript?.slice(0, 100) || '',
+        lastAiReply: result.aiResponse?.slice(0, 100) || '',
+        turnCount: turnNum
+      });
+      
       log('Got response', { 
         transcript: result.transcript,
-        hasAudio: !!result.audioBase64 
+        aiReplyLength: result.aiResponse?.length 
       });
-
-      setTranscript(result.transcript);
-      setAiResponse(result.aiResponse);
-
-      // Play response
+      
+      // 6. PLAY TTS RESPONSE
       if (result.audioBase64) {
         setStatus('speaking');
+        updateDebug({ state: 'speaking' });
         
-        // Create WebSocket for streaming speech would be better
-        // But for now, play the base64
-        const audio = new Audio(`data:${result.format || 'audio/mp3'};base64,${result.audioBase64}`);
+        log('Playing TTS audio...');
         
-        audio.onended = () => {
-          log('Speech finished, resuming listening');
-          setStatus('listening');
-          isSpeakingRef.current = false;
-          speechStartRef.current = null;
-          silenceStartRef.current = null;
-          
-          // Resume listening
-          animationFrameRef.current = requestAnimationFrame(listenForSpeech);
-        };
+        const audioSrc = `data:${result.format || 'audio/mp3'};base64,${result.audioBase64}`;
+        const audio = new Audio(audioSrc);
         
-        await audio.play();
+        await new Promise((resolve, reject) => {
+          audio.onended = () => {
+            log('TTS playback complete');
+            resolve();
+          };
+          audio.onerror = (err) => {
+            log('TTS playback ERROR', err);
+            reject(err);
+          };
+          audio.play().catch(reject);
+        });
+        
       } else {
-        setStatus('listening');
-        isSpeakingRef.current = false;
-        animationFrameRef.current = requestAnimationFrame(listenForSpeech);
+        log('No TTS audio received');
       }
-
-    } catch (err) {
-      log('Processing error', err.message);
-      setError(err.message);
-      setStatus('listening');
+      
+      // 7. RESET FOR NEXT TURN
+      log('Resetting for next turn...');
+      
       isSpeakingRef.current = false;
-      animationFrameRef.current = requestAnimationFrame(listenForSpeech);
+      speechStartTimeRef.current = null;
+      silenceStartTimeRef.current = null;
+      audioChunksRef.current = [];
+      
+      setStatus('listening');
+      updateDebug({ 
+        state: 'listening',
+        silenceMs: 0,
+        chunkCount: 0
+      });
+      
+      // Restart VAD loop
+      startVADLoop();
+      
+    } catch (err) {
+      log('Turn processing FAILED', err.message);
+      updateDebug({ 
+        lastError: err.message,
+        state: 'error' 
+      });
+      setError(`Turn failed: ${err.message}`);
+      
+      // Try to recover
+      setTimeout(() => {
+        isSpeakingRef.current = false;
+        setStatus('listening');
+        updateDebug({ state: 'listening' });
+        startVADLoop();
+      }, 2000);
     }
   };
 
+  // Helper: Blob to Base64
   const blobToBase64 = (blob) => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result.split(',')[1]);
+      reader.onloadend = () => {
+        const base64 = reader.result.split(',')[1];
+        resolve(base64);
+      };
       reader.onerror = reject;
       reader.readAsDataURL(blob);
     });
@@ -279,14 +435,18 @@ function LiveCallMode({ sessionId }) {
 
   // End call
   const endCall = useCallback(async () => {
-    log('Ending call...');
+    log('=== ENDING CALL ===');
     
     // Stop all
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
     }
     if (durationIntervalRef.current) {
       clearInterval(durationIntervalRef.current);
+    }
+    if (mediaRecorderRef.current?.state === 'recording') {
+      mediaRecorderRef.current.stop();
     }
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach(t => t.stop());
@@ -294,22 +454,38 @@ function LiveCallMode({ sessionId }) {
     if (audioContextRef.current) {
       await audioContextRef.current.close();
     }
-
+    
     // End on backend
-    if (callId) {
-      await fetch(`/api/calls/${callId}/end`, {
+    if (callIdRef.current) {
+      await fetch(`/api/calls/${callIdRef.current}/end`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript: transcript || '' })
+        body: JSON.stringify({ 
+          transcript: lastTranscriptRef.current 
+        })
       });
     }
-
+    
+    // Reset state
     setStatus('idle');
     setCallDuration(0);
-    setCallId(null);
-    setTranscript('');
-    setAiResponse('');
-  }, [callId, transcript]);
+    setError(null);
+    updateDebug({
+      micPermission: 'unknown',
+      state: 'idle',
+      chunkCount: 0,
+      volumeDb: -100,
+      silenceMs: 0,
+      lastBlobSize: 0,
+      lastError: ''
+    });
+    
+    // Clear refs
+    callIdRef.current = null;
+    isSpeakingRef.current = false;
+    audioChunksRef.current = [];
+    
+  }, [updateDebug]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -328,15 +504,80 @@ function LiveCallMode({ sessionId }) {
     <div className="live-call-mode">
       <div className="mode-header">
         <h3>📞 Live Call Mode</h3>
-        <p>Continuous conversation. Speak naturally, Friday responds.</p>
+        <p>Continuous conversation. Speak naturally.</p>
       </div>
 
+      {/* Error Banner */}
       {error && (
-        <div className="error-box">
-          ⚠️ {error}
+        <div className="error-banner">
+          <strong>Error:</strong> {error}
+          <button onClick={() => setError(null)}>✕</button>
         </div>
       )}
 
+      {/* Debug Panel */}
+      <div className="debug-panel">
+        <h4>🔍 Live Diagnostics</h4>
+        <div className="debug-grid">
+          <div className="debug-row">
+            <span className="label">Mic:</span>
+            <span className={`value ${debug.micPermission}`}>{debug.micPermission}</span>
+          </div>
+          <div className="debug-row">
+            <span className="label">State:</span>
+            <span className={`value state-${debug.state}`}>{debug.state}</span>
+          </div>
+          <div className="debug-row">
+            <span className="label">Volume:</span>
+            <span className="value">{debug.volumeDb} dB</span>
+            <div className="volume-bar">
+              <div 
+                className="volume-fill" 
+                style={{ 
+                  width: `${Math.max(0, (debug.volumeDb + 60) / 60 * 100)}%`,
+                  background: debug.volumeDb > SILENCE_THRESHOLD_DB ? '#44ff44' : '#667eea'
+                }}
+              />
+            </div>
+          </div>
+          <div className="debug-row">
+            <span className="label">Silence:</span>
+            <span className="value">{debug.silenceMs}ms</span>
+          </div>
+          <div className="debug-row">
+            <span className="label">Chunks:</span>
+            <span className="value">{debug.chunkCount}</span>
+          </div>
+          <div className="debug-row">
+            <span className="label">Last Blob:</span>
+            <span className="value">{debug.lastBlobSize} bytes</span>
+          </div>
+          <div className="debug-row">
+            <span className="label">Turns:</span>
+            <span className="value">{debug.turnCount}</span>
+          </div>
+          {debug.lastTranscript && (
+            <div className="debug-row transcript">
+              <span className="label">You:</span>
+              <span className="value">"{debug.lastTranscript}"</span>
+            </div>
+          )}
+          {debug.lastAiReply && (
+            <div className="debug-row transcript">
+              <span className="label">Friday:</span>
+              <span className="value">"{debug.lastAiReply}"</span>
+            </div>
+          )}
+          {debug.lastError && (
+            <div className="debug-row error">
+              <span className="label">Error:</span>
+              <span className="value">{debug.lastError}</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Idle State */}
       {status === 'idle' && (
         <button className="start-call-btn" onClick={startCall}>
           <span>📞</span>
@@ -344,67 +585,55 @@ function LiveCallMode({ sessionId }) {
         </button>
       )}
 
+      {/* Active Call */}
       {(status === 'listening' || status === 'thinking' || status === 'speaking') && (
         <div className="active-call">
           <div className="call-header">
             <span className="duration">{formatDuration(callDuration)}</span>
-            <button className="end-btn" onClick={endCall}>End</button>
+            <button className="end-btn" onClick={endCall}>End Call</button>
           </div>
 
-          <div className={`status-indicator ${status}`}>
+          <div className={`status-display ${status}`}>
             {status === 'listening' && (
               <>
-                <div className="listening-visual">
-                  <div className="orb" style={{ transform: `scale(${1 + audioLevel * 0.5})` }}>
-                    🎤
-                  </div>
-                  <div className="waves">
-                    {[...Array(3)].map((_, i) => (
-                      <div 
-                        key={i} 
-                        className="wave"
-                        style={{ 
-                          animationDelay: `${i * 0.2}s`,
-                          opacity: 0.3 + audioLevel * 0.7
-                        }}
-                      />
-                    ))}
-                  </div>
-                </div>
+                <div className="status-icon">🎤</div>
                 <p>Listening...</p>
-                <span className="sub">Speak naturally</span>
+                <span className="hint">Speak naturally, pause when done</span>
               </>
             )}
-
+            
             {status === 'thinking' && (
               <>
-                <div className="thinking-spinner"></div>
-                <p>Thinking...</p>
+                <div className="spinner"></div>
+                <p>Processing...</p>
+                <span className="hint">STT → AI → TTS</span>
               </>
             )}
-
+            
             {status === 'speaking' && (
               <>
-                <div className="speaking-indicator">
-                  <span className="sound-icon">🔊</span>
-                </div>
+                <div className="speaking-icon">🔊</div>
                 <p>Speaking...</p>
+                <span className="hint">Friday is responding</span>
               </>
             )}
           </div>
 
-          <div className="conversation">
-            {transcript && (
-              <div className="msg user">
-                <strong>You:</strong> {transcript}
-              </div>
-            )}
-            {aiResponse && status !== 'listening' && (
-              <div className="msg assistant">
-                <strong>Friday:</strong> {aiResponse}
-              </div>
-            )}
-          </div>
+          {/* Current turn transcript */}
+          {(lastTranscriptRef.current || lastAiReplyRef.current) && (
+            <div className="current-turn">
+              {lastTranscriptRef.current && (
+                <div className="turn-msg user">
+                  <strong>You:</strong> {lastTranscriptRef.current}
+                </div>
+              )}
+              {lastAiReplyRef.current && status !== 'listening' && (
+                <div className="turn-msg assistant">
+                  <strong>Friday:</strong> {lastAiReplyRef.current}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

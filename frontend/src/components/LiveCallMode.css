@@ -3,7 +3,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  max-width: 600px;
+  max-width: 700px;
   margin: 0 auto;
 }
 
@@ -25,6 +25,141 @@
   font-size: 14px;
 }
 
+/* Error banner */
+.error-banner {
+  background: rgba(255, 68, 68, 0.2);
+  border: 1px solid rgba(255, 68, 68, 0.4);
+  color: #ff8888;
+  padding: 16px 24px;
+  border-radius: 12px;
+  margin-bottom: 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  max-width: 600px;
+  width: 100%;
+}
+
+.error-banner button {
+  background: none;
+  border: none;
+  color: #ff8888;
+  font-size: 20px;
+  cursor: pointer;
+}
+
+/* Debug panel */
+.debug-panel {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(102, 126, 234, 0.2);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 30px;
+}
+
+.debug-panel h4 {
+  margin: 0 0 16px 0;
+  font-size: 14px;
+  color: #667eea;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.debug-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.debug-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.debug-row:last-child {
+  border-bottom: none;
+}
+
+.debug-row .label {
+  width: 80px;
+  color: rgba(255, 255, 255, 0.4);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.debug-row .value {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.debug-row .value.granted {
+  color: #44ff44;
+}
+
+.debug-row .value.denied,
+.debug-row .value.error {
+  color: #ff4444;
+}
+
+.debug-row .value.state-listening {
+  color: #44ff44;
+}
+
+.debug-row .value.state-recording {
+  color: #ffaa00;
+}
+
+.debug-row .value.state-processing,
+.debug-row .value.state-thinking {
+  color: #ffcc00;
+}
+
+.debug-row .value.state-speaking {
+  color: #667eea;
+}
+
+.debug-row.transcript {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+}
+
+.debug-row.transcript .label {
+  width: auto;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.debug-row.transcript .value {
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.debug-row.error .value {
+  color: #ff6666;
+}
+
+.volume-bar {
+  flex: 1;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-left: 10px;
+}
+
+.volume-fill {
+  height: 100%;
+  transition: width 0.1s ease;
+}
+
+/* Start button */
 .start-call-btn {
   width: 220px;
   height: 220px;
@@ -53,6 +188,7 @@
   font-size: 60px;
 }
 
+/* Active call */
 .active-call {
   width: 100%;
   background: rgba(0, 0, 0, 0.3);
@@ -92,130 +228,84 @@
   background: rgba(255, 68, 68, 1);
 }
 
-.status-indicator {
+/* Status display */
+.status-display {
   text-align: center;
   padding: 40px 20px;
 }
 
-.status-indicator p {
-  font-size: 18px;
-  margin-top: 15px;
-  color: rgba(255, 255, 255, 0.8);
+.status-display .status-icon {
+  font-size: 60px;
+  margin-bottom: 20px;
 }
 
-.status-indicator .sub {
-  font-size: 13px;
-  color: rgba(255, 255, 255, 0.4);
-}
-
-/* Listening state */
-.listening-visual {
-  position: relative;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  height: 150px;
-}
-
-.orb {
-  width: 100px;
-  height: 100px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 40px;
-  box-shadow: 0 0 60px rgba(102, 126, 234, 0.5);
-  transition: transform 0.1s ease;
-}
-
-.waves {
-  position: absolute;
-  display: flex;
-  gap: 5px;
-  bottom: 0;
-}
-
-.wave {
-  width: 4px;
-  height: 30px;
-  background: rgba(102, 126, 234, 0.5);
-  border-radius: 2px;
-  animation: wave 0.8s ease-in-out infinite;
-}
-
-@keyframes wave {
-  0%, 100% { transform: scaleY(0.5); }
-  50% { transform: scaleY(1); }
-}
-
-/* Thinking state */
-.thinking-spinner {
-  width: 80px;
-  height: 80px;
+.status-display .spinner {
+  width: 60px;
+  height: 60px;
   border: 4px solid rgba(255, 193, 7, 0.2);
   border-top-color: #ffc107;
   border-radius: 50%;
   animation: spin 1s linear infinite;
-  margin: 0 auto;
+  margin: 0 auto 20px;
 }
 
-/* Speaking state */
-.speaking-indicator {
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.status-display .speaking-icon {
   font-size: 60px;
-  animation: pulse-speak 0.8s infinite;
+  animation: pulse 0.5s infinite;
 }
 
-.sound-icon {
-  display: inline-block;
-}
-
-@keyframes pulse-speak {
+@keyframes pulse {
   0%, 100% { transform: scale(1); opacity: 1; }
   50% { transform: scale(1.1); opacity: 0.8; }
 }
 
-/* Conversation display */
-.conversation {
+.status-display p {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 8px 0;
+}
+
+.status-display .hint {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* Current turn transcript */
+.current-turn {
   margin-top: 30px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
+  max-width: 500px;
 }
 
-.msg {
+.turn-msg {
   padding: 16px 20px;
   border-radius: 12px;
-  max-width: 80%;
+  font-size: 14px;
+  line-height: 1.6;
 }
 
-.msg.user {
-  align-self: flex-end;
+.turn-msg.user {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  align-self: flex-end;
 }
 
-.msg.assistant {
-  align-self: flex-start;
+.turn-msg.assistant {
   background: rgba(68, 255, 68, 0.1);
   border: 1px solid rgba(68, 255, 68, 0.3);
+  align-self: flex-start;
 }
 
-.msg strong {
+.turn-msg strong {
   display: block;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 1px;
   margin-bottom: 6px;
   opacity: 0.7;
-}
-
-.error-box {
-  background: rgba(255, 68, 68, 0.2);
-  border: 1px solid rgba(255, 68, 68, 0.4);
-  color: #ff8888;
-  padding: 16px 24px;
-  border-radius: 12px;
-  margin-bottom: 20px;
-  text-align: center;
 }

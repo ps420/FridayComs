@@ -172,13 +172,15 @@ app.post('/api/calls/:id/process', async (req, res) => {
   const startTime = Date.now();
   const { audioBase64, sessionId, mimeType } = req.body;
   
-  console.log(`\n[Voice API] /api/calls/${req.params.id}/process called`);
-  console.log(`  - Session: ${sessionId}`);
+  console.log(`\n========== VOICE TURN START ==========`);
+  console.log(`[Turn] Endpoint: /api/calls/${req.params.id}/process`);
+  console.log(`[Turn] Session: ${sessionId}`);
+  console.log(`[Turn] Received audio:`);
   console.log(`  - MIME type: ${mimeType || 'not provided'}`);
-  console.log(`  - Base64 length: ${audioBase64?.length || 0}`);
+  console.log(`  - Base64 length: ${audioBase64?.length || 0} chars`);
   
   if (!audioBase64) {
-    console.log('[Voice API] Error: No audio data');
+    console.log('[Turn] ERROR: No audio data received');
     return res.status(400).json({ error: 'Audio data required' });
   }
   
@@ -189,22 +191,23 @@ app.post('/api/calls/:id/process', async (req, res) => {
     const aiProvider = getProviderManager();
     
     if (!speechService.isEnabled()) {
-      console.log('[Voice API] Error: Speech service not enabled');
+      console.log('[Turn] ERROR: Speech service not configured');
       return res.status(503).json({ error: 'Azure Speech Service not configured' });
     }
     
     // Decode audio from base64
     const audioBuffer = Buffer.from(audioBase64, 'base64');
-    console.log(`[Voice API] Decoded ${audioBuffer.length} bytes`);
+    console.log(`[Turn] Decoded: ${audioBuffer.length} bytes`);
     
     // Step 1: Speech-to-Text
-    console.log('[Voice API] Step 1: Speech-to-Text...');
+    console.log('[Turn] Step 1: Speech-to-Text...');
     const sttResult = await speechService.recognizeOnce(audioBuffer, mimeType);
     const userTranscript = sttResult.text;
     
-    console.log(`[Voice API] Transcript: "${userTranscript}"`);
+    console.log(`[Turn] STT Result: "${userTranscript}"`);
     
     if (!userTranscript) {
+      console.log('[Turn] WARNING: No speech detected');
       return res.status(200).json({
         transcript: '',
         aiResponse: '',
@@ -225,28 +228,32 @@ app.post('/api/calls/:id/process', async (req, res) => {
     }
     
     // Step 3: Send to AI provider
-    console.log('[Voice API] Step 2: AI...');
+    console.log('[Turn] Step 2: Sending to Azure OpenAI...');
+    const aiStart = Date.now();
     const aiResult = await aiProvider.sendMessage(userTranscript, { 
       context,
       streaming: false 
     });
+    const aiLatency = Date.now() - aiStart;
     
     const aiResponse = aiResult.content;
-    console.log(`[Voice API] AI: "${aiResponse.slice(0, 80)}..."`);
+    console.log(`[Turn] AI Response (${aiLatency}ms): "${aiResponse.slice(0, 100)}${aiResponse.length > 100 ? '...' : ''}"`);
     
     // Save AI message to session
     let aiMessage = null;
     if (sessionId) {
       aiMessage = messageService.addMessage(sessionId, 'assistant', aiResponse, {
         provider: aiResult.provider,
-        latency: Date.now() - startTime,
+        latency: aiLatency,
         usage: aiResult.usage
       });
     }
     
     // Step 4: Text-to-Speech
-    console.log('[Voice API] Step 3: TTS...');
+    console.log('[Turn] Step 3: Text-to-Speech...');
+    const ttsStart = Date.now();
     const ttsResult = await speechService.textToSpeech(aiResponse);
+    console.log(`[Turn] TTS Complete (${Date.now() - ttsStart}ms): ${ttsResult.audioBase64.length} bytes`);
     
     const duration = Math.floor((Date.now() - startTime) / 1000);
     
