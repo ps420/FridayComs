@@ -4,47 +4,63 @@
   gap: 12px;
   padding: 20px 30px;
   background: rgba(0, 0, 0, 0.3);
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid rgba(102, 126, 234, 0.2);
+  backdrop-filter: blur(20px);
 }
 
 .upload-btn, .voice-btn, .send-btn {
-  width: 44px;
-  height: 44px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   border: none;
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
   color: white;
-  font-size: 20px;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.3s ease;
   display: flex;
   align-items: center;
   justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .upload-btn:hover, .voice-btn:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.1);
+  transform: scale(1.05);
+  border-color: rgba(102, 126, 234, 0.3);
 }
 
 .send-btn {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  opacity: 0.5;
+  transition: all 0.3s ease;
 }
 
-.send-btn:hover {
+.send-btn.active {
+  opacity: 1;
+  box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+}
+
+.send-btn.active:hover {
   transform: scale(1.05);
+  box-shadow: 0 6px 25px rgba(102, 126, 234, 0.6);
+}
+
+.send-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
 .message-input {
   flex: 1;
-  height: 44px;
-  padding: 0 20px;
-  border-radius: 22px;
-  border: none;
-  background: rgba(255, 255, 255, 0.1);
+  height: 48px;
+  padding: 0 24px;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
   color: white;
   font-size: 14px;
   outline: none;
-  transition: background 0.2s;
+  transition: all 0.3s ease;
 }
 
 .message-input::placeholder {
@@ -52,5 +68,7 @@
 }
 
 .message-input:focus {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(102, 126, 234, 0.5);
+  box-shadow: 0 0 20px rgba(102, 126, 234, 0.2);
 }
