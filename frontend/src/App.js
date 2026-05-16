@@ -5,6 +5,7 @@ import ChatArea from './components/ChatArea';
 import Orb from './components/Orb';
 import InputBar from './components/InputBar';
 import SettingsPanel from './components/SettingsPanel';
+import Calls from './components/Calls';
 
 function App() {
   const [healthStatus, setHealthStatus] = useState(null);
@@ -241,6 +242,7 @@ function App() {
           </>
         )}
         
+        {activeTab === 'calls' && <Calls sessionId={sessionId} />}
         {activeTab === 'settings' && <SettingsPanel sessionId={sessionId} />}
       </div>
 

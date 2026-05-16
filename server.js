@@ -127,6 +127,50 @@ app.get('/api/sessions/:id/summary', async (req, res) => {
   res.json({ summary });
 });
 
+// Call endpoints
+const { getCallService } = require('./backend/services/callService');
+const callService = getCallService();
+
+app.post('/api/calls', (req, res) => {
+  const { sessionId, callType = 'voice' } = req.body;
+  const userId = req.userId;
+  
+  if (!sessionId) {
+    return res.status(400).json({ error: 'Session ID required' });
+  }
+  
+  const call = callService.initiateCall(sessionId, userId, callType);
+  res.json(call);
+});
+
+app.post('/api/calls/:id/start', (req, res) => {
+  const call = callService.startCall(req.params.id);
+  if (!call) {
+    return res.status(404).json({ error: 'Call not found' });
+  }
+  res.json(call);
+});
+
+app.post('/api/calls/:id/end', (req, res) => {
+  const { transcript } = req.body;
+  const call = callService.endCall(req.params.id, { transcript });
+  if (!call) {
+    return res.status(404).json({ error: 'Call not found' });
+  }
+  res.json(call);
+});
+
+app.get('/api/sessions/:id/calls', (req, res) => {
+  const calls = callService.getSessionCalls(req.params.id);
+  res.json(calls);
+});
+
+app.get('/api/calls/history', (req, res) => {
+  const userId = req.userId;
+  const history = callService.getCallHistory(userId);
+  res.json(history);
+});
+
 // WebSocket handling with session support
 wss.on('connection', (ws, req) => {
   console.log('[WebSocket] Client connected');
