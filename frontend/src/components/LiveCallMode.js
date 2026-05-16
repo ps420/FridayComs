@@ -46,6 +46,7 @@ function LiveCallMode({ sessionId }) {
   const durationIntervalRef = useRef(null);
   const audioPlayerRef = useRef(null); // For barge-in interrupt
   const isInterruptedRef = useRef(false); // Track if current turn was interrupted
+  const statusRef = useRef(status); // Track status in ref for VAD loop
   
   // VAD state refs
   const isSpeakingRef = useRef(false);
@@ -130,6 +131,7 @@ function LiveCallMode({ sessionId }) {
   }, [sessionId, updateDebug]);
 
   // VAD Loop - runs continuously for barge-in detection
+  // Note: Uses statusRef instead of status state to avoid stale closures
   const startVADLoop = useCallback(() => {
     log('VAD loop starting (with barge-in enabled)');
     
@@ -155,8 +157,11 @@ function LiveCallMode({ sessionId }) {
       // Update volume display
       updateDebug({ volumeDb: Math.round(db) });
       
+      // Get current status from ref (not stale closure)
+      const currentStatus = statusRef.current;
+      
       // BARGE-IN DETECTION: Check if user is speaking during TTS playback
-      if (status === 'speaking' && !isSpeakingRef.current) {
+      if (currentStatus === 'speaking' && !isSpeakingRef.current) {
         // Use higher threshold for barge-in (need to speak louder to interrupt)
         const isBargeIn = db > BARGE_IN_THRESHOLD_DB;
         
@@ -168,7 +173,7 @@ function LiveCallMode({ sessionId }) {
       }
       
       // NORMAL SPEECH DETECTION (only when listening)
-      if (status === 'listening') {
+      if (currentStatus === 'listening') {
         const isSpeech = db > SILENCE_THRESHOLD_DB;
         
         if (isSpeech) {
@@ -442,7 +447,8 @@ function LiveCallMode({ sessionId }) {
       }
       
       // 7. RESET FOR NEXT TURN (only if not already interrupted and barge-in happened)
-      if (status !== 'listening') {
+      // Use statusRef to check current status (not stale closure)
+      if (statusRef.current !== 'listening') {
         log('Resetting for next turn...');
         
         isSpeakingRef.current = false;
@@ -554,6 +560,11 @@ function LiveCallMode({ sessionId }) {
     audioChunksRef.current = [];
     
   }, [updateDebug]);
+
+  // Keep statusRef in sync with status state
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   // Cleanup on unmount
   useEffect(() => {
